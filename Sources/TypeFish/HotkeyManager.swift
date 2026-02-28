@@ -9,8 +9,11 @@ class HotkeyManager {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     
-    /// Called when the hotkey is pressed
+    /// Called when the hotkey is pressed (Option+Space)
     var onToggle: (() -> Void)?
+    
+    /// Called when Escape is pressed (cancel recording)
+    var onCancel: (() -> Void)?
     
     // Singleton needed because CGEvent tap callback is a C function pointer
     static var shared: HotkeyManager?
@@ -76,6 +79,15 @@ class HotkeyManager {
                 HotkeyManager.shared?.onToggle?()
             }
             return nil  // Swallow the event
+        }
+        
+        // Escape (keyCode 53) — cancel recording
+        if keyCode == 53 && meaningful.isEmpty {
+            DispatchQueue.main.async {
+                HotkeyManager.shared?.onCancel?()
+            }
+            // Don't swallow Escape — let it propagate to other apps too
+            return Unmanaged.passRetained(event)
         }
         
         return Unmanaged.passRetained(event)

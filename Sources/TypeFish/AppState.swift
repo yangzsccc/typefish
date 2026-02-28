@@ -13,18 +13,37 @@ class AppState: ObservableObject {
     let recorder = AudioRecorder()
     let groqAPIKey: String?
     
+    /// Custom dictionary for vocabulary hints and replacements
+    var dictionary: CustomDictionary
+    
+    /// File monitor for auto-reloading dictionary
+    private var dictFileMonitor: DispatchSourceFileSystemObject?
+    
+    /// Custom sounds
+    private var startSound: NSSound?
+    private var stopSound: NSSound?
+    private var cancelSound: NSSound?
+    
     /// Callback to update menu bar icon
     var onStateChange: (() -> Void)?
     
     init() {
         self.config = AppConfig.load()
         self.groqAPIKey = AppState.loadAPIKey()
+        self.dictionary = CustomDictionary.load()
+        
+        // Load custom sounds
+        self.startSound = AppState.loadSound("start")
+        self.stopSound = AppState.loadSound("stop")
+        self.cancelSound = AppState.loadSound("cancel")
         
         if groqAPIKey != nil {
             Log.info("✅ Groq API key loaded")
         } else {
             Log.info("❌ No Groq API key found! Set GROQ_API_KEY env var or create ~/.config/typefish/groq_key")
         }
+        
+        watchDictionaryFile()
     }
     
     /// Toggle recording on/off
@@ -33,6 +52,34 @@ class AppState: ObservableObject {
             stopAndProcess()
         } else {
             startRecording()
+        }
+    }
+    
+    /// Cancel current recording without processing
+    func cancelRecording() {
+        guard isRecording else { return }
+        
+        Log.info("🚫 Recording cancelled by user")
+        
+        // Stop the recorder immediately, discard the file
+        if let audioURL = recorder.stopRecording() {
+            cleanup(audioURL)
+        }
+        
+        isRecording = false
+        isProcessing = false
+        statusText = "❌ Cancelled"
+        onStateChange?()
+        
+        cancelSound?.play()
+        
+        // Reset status after 1.5 seconds
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self = self else { return }
+            if !self.isRecording && !self.isProcessing {
+                self.statusText = "Ready"
+                self.onStateChange?()
+            }
         }
     }
     
@@ -52,21 +99,33 @@ class AppState: ObservableObject {
             isRecording = true
             statusText = "🔴 Recording..."
             onStateChange?()
-            // Play start sound
-            NSSound(named: "Tink")?.play()
+            startSound?.play()
         }
     }
     
     private func stopAndProcess() {
+        // Brief delay after pressing stop to capture trailing speech
+        isRecording = false
+        statusText = "⏳ Finishing..."
+        onStateChange?()
+        
+        Log.info("⏱️ Recording tail buffer (400ms)...")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self = self else {
+                Log.info("❌ Self deallocated during tail buffer")
+                return
+            }
+            self.finalizeRecording()
+        }
+    }
+    
+    private func finalizeRecording() {
         guard let audioURL = recorder.stopRecording() else {
             Log.info("⚠️ No audio file from recording")
-            isRecording = false
             statusText = "Ready"
             onStateChange?()
             return
         }
-        
-        isRecording = false
         
         // Check if audio was silence (prevent Whisper hallucination)
         if recorder.wasSilent() {
@@ -86,8 +145,7 @@ class AppState: ObservableObject {
         statusText = "⏳ Transcribing..."
         onStateChange?()
         
-        // Play stop sound
-        NSSound(named: "Pop")?.play()
+        stopSound?.play()
         
         guard let apiKey = groqAPIKey else {
             Log.info("❌ No API key, cannot transcribe")
@@ -99,7 +157,10 @@ class AppState: ObservableObject {
         }
         
         // Pipeline: Transcribe → Polish → Paste
-        WhisperAPI.transcribe(fileURL: audioURL, apiKey: apiKey, model: config.whisperModel) { [weak self] rawText in
+        // Build Whisper prompt from dictionary vocabulary
+        let vocabPrompt = dictionary.whisperPrompt()
+        
+        WhisperAPI.transcribe(fileURL: audioURL, apiKey: apiKey, model: config.whisperModel, language: config.whisperLanguage, prompt: vocabPrompt) { [weak self] rawText in
             guard let self = self else { return }
             
             guard !rawText.isEmpty else {
@@ -112,17 +173,26 @@ class AppState: ObservableObject {
                 return
             }
             
+            // Apply dictionary replacements
+            let correctedText = self.dictionary.applyReplacements(rawText)
+            
             DispatchQueue.main.async {
                 self.statusText = "✨ Polishing..."
                 self.onStateChange?()
             }
             
+            // Build polisher prompt with dictionary reference
+            var fullSystemPrompt = self.config.polisherSystemPrompt
+            if let ref = self.dictionary.polisherReference() {
+                fullSystemPrompt += "\n\n" + ref
+            }
+            
             // Polish the transcript
             TextPolisher.polish(
-                text: rawText,
+                text: correctedText,
                 apiKey: apiKey,
                 model: self.config.polisherModel,
-                systemPrompt: self.config.polisherSystemPrompt
+                systemPrompt: fullSystemPrompt
             ) { polishedText in
                 DispatchQueue.main.async {
                     // Paste to cursor
@@ -148,6 +218,67 @@ class AppState: ObservableObject {
     
     private func cleanup(_ url: URL) {
         try? FileManager.default.removeItem(at: url)
+    }
+    
+    // MARK: - Dictionary File Watching
+    
+    private func watchDictionaryFile() {
+        let path = CustomDictionary.fileURL.path
+        let fd = open(path, O_EVTONLY)
+        guard fd >= 0 else {
+            Log.info("⚠️ Cannot watch dictionary file")
+            return
+        }
+        
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .rename, .delete],
+            queue: .main
+        )
+        
+        source.setEventHandler { [weak self] in
+            // Small delay to let file writes complete
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                self?.dictionary = CustomDictionary.load()
+            }
+        }
+        
+        source.setCancelHandler {
+            close(fd)
+        }
+        
+        source.resume()
+        self.dictFileMonitor = source
+        Log.info("👁️ Watching dictionary file for changes")
+    }
+    
+    // MARK: - Sound Loading
+    
+    /// Load a custom sound file from the app bundle Resources or fallback locations
+    private static func loadSound(_ name: String) -> NSSound? {
+        let paths = [
+            // Inside .app bundle
+            Bundle.main.bundlePath + "/Contents/Resources/\(name).aiff",
+            // Development: next to source
+            Bundle.main.bundlePath + "/../Sources/TypeFish/Sounds/\(name).aiff",
+            // Development: relative to working directory
+            FileManager.default.currentDirectoryPath + "/Sources/TypeFish/Sounds/\(name).aiff",
+            // Absolute fallback
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("typefish/Sources/TypeFish/Sounds/\(name).aiff").path
+        ]
+        
+        for path in paths {
+            if FileManager.default.fileExists(atPath: path) {
+                if let sound = NSSound(contentsOfFile: path, byReference: true) {
+                    Log.info("🔔 Loaded sound: \(name) from \(path)")
+                    return sound
+                }
+            }
+        }
+        
+        Log.info("⚠️ Sound not found: \(name), using system fallback")
+        return NSSound(named: name == "start" ? "Tink" : "Pop")
     }
     
     // MARK: - API Key Loading

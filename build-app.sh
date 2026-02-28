@@ -16,6 +16,12 @@ mkdir -p "TypeFish.app/Contents/Resources"
 # Copy binary
 cp .build/release/TypeFish "$APP_DIR/TypeFish"
 
+# Copy custom sounds
+cp Sources/TypeFish/Sounds/*.aiff "TypeFish.app/Contents/Resources/" 2>/dev/null || true
+
+# Copy default dictionary
+cp default-dictionary.json "TypeFish.app/Contents/Resources/" 2>/dev/null || true
+
 # Create Info.plist
 cat > TypeFish.app/Contents/Info.plist << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -44,7 +50,9 @@ cat > TypeFish.app/Contents/Info.plist << 'PLIST'
 </plist>
 PLIST
 
-echo "✅ Built: $(pwd)/TypeFish.app"
+# Code sign (preserves Accessibility permission across rebuilds)
+codesign --force --deep --sign "Local Dev Signing" "TypeFish.app" 2>&1
+echo "✅ Built & signed: $(pwd)/TypeFish.app"
 echo "📋 Next steps:"
 echo "   1. Double-click TypeFish.app to launch"
 echo "   2. Grant Accessibility permission when prompted"

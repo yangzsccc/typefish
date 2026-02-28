@@ -1,6 +1,32 @@
 import AppKit
 
 /// Manages the menu bar status item (icon + menu).
+/// NSTextField subclass that supports Cmd+V paste, Cmd+A select all, etc.
+class EditableTextField: NSTextField {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags == .command {
+            switch event.charactersIgnoringModifiers {
+            case "v":
+                NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: self)
+                return true
+            case "c":
+                NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: self)
+                return true
+            case "x":
+                NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: self)
+                return true
+            case "a":
+                NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: self)
+                return true
+            default:
+                break
+            }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
 class MenuBarController {
     
     private var statusItem: NSStatusItem!
@@ -33,6 +59,33 @@ class MenuBarController {
         let hotkeyItem = NSMenuItem(title: "⌥ Space — Toggle Recording", action: nil, keyEquivalent: "")
         hotkeyItem.isEnabled = false
         menu.addItem(hotkeyItem)
+        
+        let escItem = NSMenuItem(title: "⎋ Esc — Cancel Recording", action: nil, keyEquivalent: "")
+        escItem.isEnabled = false
+        menu.addItem(escItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        
+        // Dictionary section
+        let dictHeader = NSMenuItem(title: "📖 Dictionary", action: nil, keyEquivalent: "")
+        dictHeader.isEnabled = false
+        menu.addItem(dictHeader)
+        
+        let addWordItem = NSMenuItem(title: "Add Word...", action: #selector(addWord), keyEquivalent: "d")
+        addWordItem.target = self
+        menu.addItem(addWordItem)
+        
+        let addCorrectionItem = NSMenuItem(title: "Add Correction...", action: #selector(addCorrection), keyEquivalent: "")
+        addCorrectionItem.target = self
+        menu.addItem(addCorrectionItem)
+        
+        let editDictItem = NSMenuItem(title: "Edit Dictionary File", action: #selector(editDictionary), keyEquivalent: "")
+        editDictItem.target = self
+        menu.addItem(editDictItem)
+        
+        let reloadDictItem = NSMenuItem(title: "Reload Dictionary", action: #selector(reloadDictionary), keyEquivalent: "")
+        reloadDictItem.target = self
+        menu.addItem(reloadDictItem)
         
         menu.addItem(NSMenuItem.separator())
         
@@ -100,6 +153,99 @@ class MenuBarController {
         }
         image.isTemplate = !recording && !processing  // Template for dark/light mode (normal state only)
         return image
+    }
+    
+    // MARK: - Dictionary Actions
+    
+    @objc private func addWord() {
+        let alert = NSAlert()
+        alert.messageText = "Add Word (Whisper Hint)"
+        alert.informativeText = "Add words Whisper often gets wrong.\nOnly for unusual/tricky words — common words don't need this.\nComma-separated for multiple."
+        alert.addButton(withTitle: "Add")
+        alert.addButton(withTitle: "Cancel")
+        
+        let input = EditableTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        input.placeholderString = "e.g. Junyan, pgvector, Chipotle"
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+        
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            let words = input.stringValue
+                .components(separatedBy: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            
+            for word in words {
+                state.dictionary.addHint(word)
+            }
+            
+            if !words.isEmpty {
+                showNotification("📖 Added \(words.count) hint(s): \(words.joined(separator: ", "))")
+            }
+        }
+    }
+    
+    @objc private func addCorrection() {
+        let alert = NSAlert()
+        alert.messageText = "Add Correction"
+        alert.informativeText = "When Whisper outputs the wrong word, replace it.\nExample: 俊言 → Junyan"
+        alert.addButton(withTitle: "Add")
+        alert.addButton(withTitle: "Cancel")
+        
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 58))
+        
+        let wrongLabel = NSTextField(labelWithString: "Wrong:")
+        wrongLabel.frame = NSRect(x: 0, y: 34, width: 50, height: 20)
+        container.addSubview(wrongLabel)
+        
+        let wrongInput = EditableTextField(frame: NSRect(x: 55, y: 32, width: 245, height: 24))
+        wrongInput.placeholderString = "What Whisper outputs"
+        container.addSubview(wrongInput)
+        
+        let rightLabel = NSTextField(labelWithString: "Right:")
+        rightLabel.frame = NSRect(x: 0, y: 4, width: 50, height: 20)
+        container.addSubview(rightLabel)
+        
+        let rightInput = EditableTextField(frame: NSRect(x: 55, y: 2, width: 245, height: 24))
+        rightInput.placeholderString = "What it should be"
+        container.addSubview(rightInput)
+        
+        alert.accessoryView = container
+        alert.window.initialFirstResponder = wrongInput
+        
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            let wrong = wrongInput.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let right = rightInput.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            if !wrong.isEmpty && !right.isEmpty {
+                state.dictionary.addReplacement(wrong: wrong, right: right)
+                showNotification("📖 Added: \(wrong) → \(right)")
+            }
+        }
+    }
+    
+    @objc private func editDictionary() {
+        // Open dictionary file in default editor
+        NSWorkspace.shared.open(CustomDictionary.fileURL)
+    }
+    
+    @objc private func reloadDictionary() {
+        state.dictionary = CustomDictionary.load()
+        showNotification("📖 Dictionary reloaded: \(state.dictionary.vocabulary.count) vocab, \(state.dictionary.replacements.count) replacements")
+    }
+    
+    private func showNotification(_ message: String) {
+        Log.info(message)
+        // Brief tooltip update
+        if let button = statusItem.button {
+            let prev = button.toolTip
+            button.toolTip = message
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                button.toolTip = prev
+            }
+        }
     }
     
     @objc private func quit() {

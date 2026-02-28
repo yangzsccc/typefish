@@ -13,6 +13,8 @@ enum WhisperAPI {
         fileURL: URL,
         apiKey: String,
         model: String = "whisper-large-v3-turbo",
+        language: String? = nil,
+        prompt: String? = nil,
         completion: @escaping (String) -> Void
     ) {
         guard let url = URL(string: "https://api.groq.com/openai/v1/audio/transcriptions") else {
@@ -35,6 +37,27 @@ enum WhisperAPI {
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
         body.append("Content-Disposition: form-data; name=\"model\"\r\n\r\n".data(using: .utf8)!)
         body.append("\(model)\r\n".data(using: .utf8)!)
+        
+        // language field (helps accuracy for zh/en)
+        if let lang = language, !lang.isEmpty {
+            body.append("--\(boundary)\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"language\"\r\n\r\n".data(using: .utf8)!)
+            body.append("\(lang)\r\n".data(using: .utf8)!)
+        }
+        
+        // language field
+        if let lang = language, !lang.isEmpty {
+            body.append("--\(boundary)\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"language\"\r\n\r\n".data(using: .utf8)!)
+            body.append("\(lang)\r\n".data(using: .utf8)!)
+        }
+        
+        // prompt field (vocabulary hints for better recognition)
+        if let prompt = prompt, !prompt.isEmpty {
+            body.append("--\(boundary)\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"prompt\"\r\n\r\n".data(using: .utf8)!)
+            body.append("\(prompt)\r\n".data(using: .utf8)!)
+        }
         
         // file field
         guard let fileData = try? Data(contentsOf: fileURL) else {

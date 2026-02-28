@@ -33,6 +33,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager.onToggle = { [weak self] in
             self?.state.toggleRecording()
         }
+        hotkeyManager.onCancel = { [weak self] in
+            self?.state.cancelRecording()
+        }
         hotkeyManager.start()
         
         Log.info("🐟 TypeFish ready! Press Option+Space to start dictating.")
