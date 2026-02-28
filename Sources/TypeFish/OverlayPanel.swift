@@ -115,13 +115,8 @@ class OverlayPanel {
         bg.addSubview(check)
         self.checkmark = check
         
-        // Position: bottom center
-        if let screen = NSScreen.main {
-            let sf = screen.visibleFrame
-            let x = sf.midX - pillWidth / 2
-            let y = sf.origin.y + 80
-            panel.setFrame(NSRect(x: x, y: y, width: pillWidth, height: pillHeight), display: true)
-        }
+        // Position will be set on show
+        panel.setFrame(NSRect(x: 0, y: 0, width: pillWidth, height: pillHeight), display: false)
         
         self.window = panel
     }
@@ -189,8 +184,20 @@ class OverlayPanel {
     
     // MARK: - Fade
     
+    /// Position the pill on the screen where the mouse cursor is
+    private func positionOnActiveScreen() {
+        guard let w = window else { return }
+        let mouseLocation = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main ?? NSScreen.screens[0]
+        let sf = screen.visibleFrame
+        let x = sf.midX - pillWidth / 2
+        let y = sf.origin.y + 80
+        w.setFrame(NSRect(x: x, y: y, width: pillWidth, height: pillHeight), display: true)
+    }
+    
     private func fadeIn() {
         guard let w = window else { return }
+        positionOnActiveScreen()
         w.alphaValue = 0
         w.orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { ctx in
