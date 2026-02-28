@@ -44,6 +44,9 @@ class AppState: ObservableObject {
             return
         }
         
+        // Save reference to the app user is typing in BEFORE we do anything
+        PasteService.saveFrontmostApp()
+        
         let success = recorder.startRecording()
         if success {
             isRecording = true
@@ -64,6 +67,21 @@ class AppState: ObservableObject {
         }
         
         isRecording = false
+        
+        // Check if audio was silence (prevent Whisper hallucination)
+        if recorder.wasSilent() {
+            statusText = "🔇 No speech"
+            onStateChange?()
+            cleanup(audioURL)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                if !self.isRecording && !self.isProcessing {
+                    self.statusText = "Ready"
+                    self.onStateChange?()
+                }
+            }
+            return
+        }
+        
         isProcessing = true
         statusText = "⏳ Transcribing..."
         onStateChange?()

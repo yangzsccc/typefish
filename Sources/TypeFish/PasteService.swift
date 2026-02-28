@@ -1,10 +1,21 @@
 import AppKit
 
 /// Pastes text at the current cursor position.
-/// Writes to pasteboard, then simulates Cmd+V.
+/// Tracks the frontmost app and restores focus before pasting.
 enum PasteService {
     
-    /// Paste text at current cursor position
+    /// The app that was active when recording started
+    private(set) static var savedApp: NSRunningApplication?
+    
+    /// Save reference to the currently focused app (call when recording starts)
+    static func saveFrontmostApp() {
+        savedApp = NSWorkspace.shared.frontmostApplication
+        if let app = savedApp {
+            Log.info("📌 Saved frontmost app: \(app.localizedName ?? "unknown") (pid: \(app.processIdentifier))")
+        }
+    }
+    
+    /// Paste text at current cursor position in the saved app
     /// - Parameter text: The text to paste
     static func paste(_ text: String) {
         guard !text.isEmpty else { return }
@@ -17,8 +28,15 @@ enum PasteService {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
         
-        // Small delay to ensure pasteboard is ready
-        usleep(50_000)  // 50ms
+        // Activate the saved app (the one user was typing in)
+        if let app = savedApp {
+            app.activate()
+            Log.info("📌 Activated: \(app.localizedName ?? "unknown")")
+            // Wait for app to come to front
+            usleep(150_000)  // 150ms
+        } else {
+            usleep(50_000)  // 50ms
+        }
         
         // Simulate Cmd+V
         simulatePaste()

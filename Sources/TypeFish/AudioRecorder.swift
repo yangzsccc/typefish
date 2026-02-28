@@ -2,6 +2,7 @@ import AVFoundation
 
 /// Records microphone audio to a file using AVAudioEngine.
 /// Outputs 16kHz mono WAV (optimal for Whisper).
+/// Tracks peak audio level to detect silence.
 class AudioRecorder {
     
     private let audioEngine = AVAudioEngine()
@@ -9,9 +10,14 @@ class AudioRecorder {
     private var outputURL: URL?
     private(set) var isRecording = false
     
+    /// Peak RMS level during recording (0.0 = silence, 1.0 = max)
+    private(set) var peakRMSLevel: Float = 0.0
+    
     /// Start recording microphone to a temporary file
     func startRecording() -> Bool {
         guard !isRecording else { return false }
+        
+        peakRMSLevel = 0.0
         
         // Create temp file
         let tempDir = FileManager.default.temporaryDirectory
@@ -58,6 +64,9 @@ class AudioRecorder {
             inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
                 guard let self = self, let file = self.audioFile else { return }
                 
+                // Track audio level
+                self.updatePeakLevel(buffer: buffer)
+                
                 let ratio = inputFormat.sampleRate / 16000.0
                 let outputFrames = AVAudioFrameCount(Double(buffer.frameLength) / ratio)
                 guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outputFrames) else { return }
@@ -79,6 +88,7 @@ class AudioRecorder {
         } else {
             inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
                 guard let self = self, let file = self.audioFile else { return }
+                self.updatePeakLevel(buffer: buffer)
                 do {
                     try file.write(from: buffer)
                 } catch {
@@ -117,6 +127,36 @@ class AudioRecorder {
         }
         
         return url
+    }
+    
+    /// Check if audio was basically silence (Whisper hallucination prevention)
+    /// Returns true if peak RMS was below threshold
+    func wasSilent(threshold: Float = 0.01) -> Bool {
+        let silent = peakRMSLevel < threshold
+        if silent {
+            Log.info("🔇 Audio was silence (peak RMS: \(String(format: "%.4f", peakRMSLevel)))")
+        } else {
+            Log.info("🔊 Audio peak RMS: \(String(format: "%.4f", peakRMSLevel))")
+        }
+        return silent
+    }
+    
+    /// Calculate RMS of a buffer and update peak
+    private func updatePeakLevel(buffer: AVAudioPCMBuffer) {
+        guard let channelData = buffer.floatChannelData else { return }
+        let frames = Int(buffer.frameLength)
+        guard frames > 0 else { return }
+        
+        var sum: Float = 0
+        let data = channelData[0]
+        for i in 0..<frames {
+            let sample = data[i]
+            sum += sample * sample
+        }
+        let rms = sqrtf(sum / Float(frames))
+        if rms > peakRMSLevel {
+            peakRMSLevel = rms
+        }
     }
     
     /// Request microphone permission
