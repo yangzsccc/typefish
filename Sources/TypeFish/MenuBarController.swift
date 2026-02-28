@@ -40,6 +40,9 @@ class MenuBarController {
         state.onStateChange = { [weak self] in
             self?.updateIcon()
         }
+        
+        // Check for updates on launch (silent, only prompts if update found)
+        Updater.checkInBackground()
     }
     
     private func setupStatusItem() {
@@ -86,6 +89,16 @@ class MenuBarController {
         let reloadDictItem = NSMenuItem(title: "Reload Dictionary", action: #selector(reloadDictionary), keyEquivalent: "")
         reloadDictItem.target = self
         menu.addItem(reloadDictItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        
+        let versionItem = NSMenuItem(title: "v\(Updater.currentVersion)", action: nil, keyEquivalent: "")
+        versionItem.isEnabled = false
+        menu.addItem(versionItem)
+        
+        let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "u")
+        updateItem.target = self
+        menu.addItem(updateItem)
         
         menu.addItem(NSMenuItem.separator())
         
@@ -246,6 +259,10 @@ class MenuBarController {
                 button.toolTip = prev
             }
         }
+    }
+    
+    @objc private func checkForUpdates() {
+        Updater.checkManually()
     }
     
     @objc private func quit() {

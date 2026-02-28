@@ -24,6 +24,9 @@ class AppState: ObservableObject {
     private var stopSound: NSSound?
     private var cancelSound: NSSound?
     
+    /// Floating overlay indicator
+    let overlay = OverlayPanel()
+    
     /// Callback to update menu bar icon
     var onStateChange: (() -> Void)?
     
@@ -72,6 +75,7 @@ class AppState: ObservableObject {
         onStateChange?()
         
         cancelSound?.play()
+        overlay.dismiss()
         
         // Reset status after 1.5 seconds
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
@@ -100,6 +104,7 @@ class AppState: ObservableObject {
             statusText = "🔴 Recording..."
             onStateChange?()
             startSound?.play()
+            overlay.showRecording()
         }
     }
     
@@ -131,6 +136,7 @@ class AppState: ObservableObject {
         if recorder.wasSilent() {
             statusText = "🔇 No speech"
             onStateChange?()
+            overlay.dismiss()
             cleanup(audioURL)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                 if !self.isRecording && !self.isProcessing {
@@ -146,6 +152,7 @@ class AppState: ObservableObject {
         onStateChange?()
         
         stopSound?.play()
+        overlay.showProcessing()
         
         guard let apiKey = groqAPIKey else {
             Log.info("❌ No API key, cannot transcribe")
@@ -201,6 +208,7 @@ class AppState: ObservableObject {
                     self.isProcessing = false
                     self.statusText = "✅ Done"
                     self.onStateChange?()
+                    self.overlay.showDone()
                     
                     // Reset status after 2 seconds
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {

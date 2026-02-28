@@ -44,6 +44,8 @@ cat > TypeFish.app/Contents/Info.plist << 'PLIST'
     <string>APPL</string>
     <key>LSUIElement</key>
     <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>TypeFish needs microphone access to record your speech for transcription.</string>
 </dict>
