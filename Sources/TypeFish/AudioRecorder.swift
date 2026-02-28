@@ -13,6 +13,9 @@ class AudioRecorder {
     /// Peak RMS level during recording (0.0 = silence, 1.0 = max)
     private(set) var peakRMSLevel: Float = 0.0
     
+    /// Real-time audio level callback (called on audio thread)
+    var onAudioLevel: ((Float) -> Void)?
+    
     /// Start recording microphone to a temporary file
     func startRecording() -> Bool {
         guard !isRecording else { return false }
@@ -157,6 +160,7 @@ class AudioRecorder {
         if rms > peakRMSLevel {
             peakRMSLevel = rms
         }
+        onAudioLevel?(rms)
     }
     
     /// Request microphone permission

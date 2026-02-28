@@ -12,6 +12,9 @@ class HotkeyManager {
     /// Called when the hotkey is pressed (Option+Space)
     var onToggle: (() -> Void)?
     
+    /// Called when translate hotkey is pressed (Option+Shift+Space)
+    var onTranslateToggle: (() -> Void)?
+    
     /// Called when Escape is pressed (cancel recording)
     var onCancel: (() -> Void)?
     
@@ -73,7 +76,15 @@ class HotkeyManager {
         let meaningful = NSEvent.ModifierFlags(rawValue: UInt(flags.rawValue))
             .intersection([.command, .shift, .control, .option])
         
-        // Option+Space (keyCode 49 = Space)
+        // Ctrl+Option+Space (keyCode 49 = Space) — translate mode
+        if meaningful == [.control, .option] && keyCode == 49 {
+            DispatchQueue.main.async {
+                HotkeyManager.shared?.onTranslateToggle?()
+            }
+            return nil  // Swallow the event
+        }
+        
+        // Option+Space (keyCode 49 = Space) — normal transcribe
         if meaningful == [.option] && keyCode == 49 {
             DispatchQueue.main.async {
                 HotkeyManager.shared?.onToggle?()

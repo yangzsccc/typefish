@@ -9,6 +9,12 @@ class AppState: ObservableObject {
     @Published var isProcessing = false
     @Published var statusText = "Ready"
     
+    /// When true, current recording will be translated to English
+    private(set) var translateMode = false
+    
+    /// Public accessor for menu bar icon
+    var isTranslateMode: Bool { translateMode }
+    
     let config: AppConfig
     let recorder = AudioRecorder()
     let groqAPIKey: String?
@@ -49,11 +55,22 @@ class AppState: ObservableObject {
         watchDictionaryFile()
     }
     
-    /// Toggle recording on/off
+    /// Toggle recording on/off (normal transcribe)
     func toggleRecording() {
         if isRecording {
             stopAndProcess()
         } else {
+            translateMode = false
+            startRecording()
+        }
+    }
+    
+    /// Toggle recording in translate-to-English mode
+    func toggleTranslateRecording() {
+        if isRecording {
+            stopAndProcess()
+        } else {
+            translateMode = true
             startRecording()
         }
     }
@@ -98,13 +115,18 @@ class AppState: ObservableObject {
         // Save reference to the app user is typing in BEFORE we do anything
         PasteService.saveFrontmostApp()
         
+        // Wire up audio level to overlay
+        recorder.onAudioLevel = { [weak self] rms in
+            self?.overlay.updateAudioLevel(rms)
+        }
+        
         let success = recorder.startRecording()
         if success {
             isRecording = true
-            statusText = "🔴 Recording..."
+            statusText = translateMode ? "🌐 Recording (Translate)..." : "🔴 Recording..."
             onStateChange?()
             startSound?.play()
-            overlay.showRecording()
+            overlay.showRecording(translate: translateMode)
         }
     }
     
@@ -132,6 +154,9 @@ class AppState: ObservableObject {
             return
         }
         
+        // Always play stop sound when recording ends
+        stopSound?.play()
+        
         // Check if audio was silence (prevent Whisper hallucination)
         if recorder.wasSilent() {
             statusText = "🔇 No speech"
@@ -151,7 +176,6 @@ class AppState: ObservableObject {
         statusText = "⏳ Transcribing..."
         onStateChange?()
         
-        stopSound?.play()
         overlay.showProcessing()
         
         guard let apiKey = groqAPIKey else {
@@ -163,11 +187,11 @@ class AppState: ObservableObject {
             return
         }
         
-        // Pipeline: Transcribe → Polish → Paste
-        // Build Whisper prompt from dictionary vocabulary
+        // Pipeline: Transcribe/Translate → Polish → Paste
         let vocabPrompt = dictionary.whisperPrompt()
+        let isTranslating = self.translateMode
         
-        WhisperAPI.transcribe(fileURL: audioURL, apiKey: apiKey, model: config.whisperModel, language: config.whisperLanguage, prompt: vocabPrompt) { [weak self] rawText in
+        let whisperCallback: (String) -> Void = { [weak self] rawText in
             guard let self = self else { return }
             
             guard !rawText.isEmpty else {
@@ -202,13 +226,19 @@ class AppState: ObservableObject {
                 systemPrompt: fullSystemPrompt
             ) { polishedText in
                 DispatchQueue.main.async {
-                    // Paste to cursor
-                    PasteService.paste(polishedText)
+                    // Try to paste to cursor
+                    let pasted = PasteService.paste(polishedText)
                     
                     self.isProcessing = false
                     self.statusText = "✅ Done"
                     self.onStateChange?()
-                    self.overlay.showDone()
+                    
+                    if pasted {
+                        self.overlay.showDone()
+                    } else {
+                        // No text input focused — show result panel with copy button
+                        self.overlay.showResult(polishedText)
+                    }
                     
                     // Reset status after 2 seconds
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
@@ -221,6 +251,14 @@ class AppState: ObservableObject {
                 
                 self.cleanup(audioURL)
             }
+        }
+        
+        // Call the appropriate Whisper endpoint
+        if isTranslating {
+            Log.info("🌐 Translate mode: will translate to English")
+            WhisperAPI.translate(fileURL: audioURL, apiKey: apiKey, model: config.whisperModel, prompt: vocabPrompt, completion: whisperCallback)
+        } else {
+            WhisperAPI.transcribe(fileURL: audioURL, apiKey: apiKey, model: config.whisperModel, language: config.whisperLanguage, prompt: vocabPrompt, completion: whisperCallback)
         }
     }
     

@@ -63,6 +63,10 @@ class MenuBarController {
         hotkeyItem.isEnabled = false
         menu.addItem(hotkeyItem)
         
+        let translateItem = NSMenuItem(title: "⌃⌥ Space — Translate to English", action: nil, keyEquivalent: "")
+        translateItem.isEnabled = false
+        menu.addItem(translateItem)
+        
         let escItem = NSMenuItem(title: "⎋ Esc — Cancel Recording", action: nil, keyEquivalent: "")
         escItem.isEnabled = false
         menu.addItem(escItem)
@@ -113,25 +117,32 @@ class MenuBarController {
         guard let button = statusItem.button else { return }
         
         if state.isRecording {
-            // Red circle when recording
-            button.image = createIcon(recording: true)
-            button.toolTip = "TypeFish — Recording..."
+            if state.isTranslateMode {
+                button.image = createIcon(translate: true)
+                button.toolTip = "TypeFish — Translating..."
+            } else {
+                button.image = createIcon(recording: true)
+                button.toolTip = "TypeFish — Recording..."
+            }
         } else if state.isProcessing {
-            // Processing indicator
             button.image = createIcon(processing: true)
             button.toolTip = "TypeFish — Processing..."
         } else {
-            // Normal mic icon
             button.image = createIcon()
             button.toolTip = "TypeFish — ⌥Space to dictate"
         }
     }
     
     /// Create a simple menu bar icon
-    private func createIcon(recording: Bool = false, processing: Bool = false) -> NSImage {
+    private func createIcon(recording: Bool = false, processing: Bool = false, translate: Bool = false) -> NSImage {
         let size = NSSize(width: 18, height: 18)
         let image = NSImage(size: size, flipped: false) { rect in
-            if recording {
+            if translate {
+                // Green filled circle for translate mode
+                NSColor.systemGreen.setFill()
+                let circle = NSBezierPath(ovalIn: rect.insetBy(dx: 3, dy: 3))
+                circle.fill()
+            } else if recording {
                 // Red filled circle
                 NSColor.systemRed.setFill()
                 let circle = NSBezierPath(ovalIn: rect.insetBy(dx: 3, dy: 3))
