@@ -42,6 +42,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager.start()
         
         Log.info("🐟 TypeFish ready! Press Option+Space to start dictating.")
+        
+        // Clean up old transcription logs (keep 7 days)
+        DispatchQueue.global().async {
+            TranscriptionLogger.cleanOldFiles()
+        }
     }
     
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

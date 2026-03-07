@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 
 /// Manages the menu bar status item (icon + menu).
 /// NSTextField subclass that supports Cmd+V paste, Cmd+A select all, etc.
@@ -93,6 +94,22 @@ class MenuBarController {
         let reloadDictItem = NSMenuItem(title: "Reload Dictionary", action: #selector(reloadDictionary), keyEquivalent: "")
         reloadDictItem.target = self
         menu.addItem(reloadDictItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        
+        // Microphone selection
+        let micHeader = NSMenuItem(title: "🎤 Microphone", action: nil, keyEquivalent: "")
+        micHeader.isEnabled = false
+        menu.addItem(micHeader)
+        
+        let currentMic = state.config.preferredMicrophone ?? "System Default"
+        let micItem = NSMenuItem(title: "  Current: \(currentMic)", action: nil, keyEquivalent: "")
+        micItem.isEnabled = false
+        menu.addItem(micItem)
+        
+        let selectMicItem = NSMenuItem(title: "  Select Microphone...", action: #selector(selectMicrophone), keyEquivalent: "")
+        selectMicItem.target = self
+        menu.addItem(selectMicItem)
         
         menu.addItem(NSMenuItem.separator())
         
@@ -269,6 +286,74 @@ class MenuBarController {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                 button.toolTip = prev
             }
+        }
+    }
+    
+    @objc private func selectMicrophone() {
+        // List available input devices
+        let devices: [AVCaptureDevice]
+        if #available(macOS 14.0, *) {
+            devices = AVCaptureDevice.DiscoverySession(
+                deviceTypes: [.microphone],
+                mediaType: .audio,
+                position: .unspecified
+            ).devices
+        } else {
+            devices = AVCaptureDevice.DiscoverySession(
+                deviceTypes: [.builtInMicrophone, .externalUnknown],
+                mediaType: .audio,
+                position: .unspecified
+            ).devices
+        }
+        
+        let alert = NSAlert()
+        alert.messageText = "Select Microphone"
+        alert.informativeText = "Choose which microphone TypeFish should use.\n\"System Default\" follows your system setting."
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 300, height: 28))
+        popup.addItem(withTitle: "System Default")
+        for device in devices {
+            popup.addItem(withTitle: device.localizedName)
+        }
+        
+        // Pre-select current
+        if let current = state.config.preferredMicrophone {
+            for i in 0..<popup.numberOfItems {
+                if let title = popup.item(at: i)?.title, title.lowercased().contains(current.lowercased()) {
+                    popup.selectItem(at: i)
+                    break
+                }
+            }
+        }
+        
+        alert.accessoryView = popup
+        NSApp.activate(ignoringOtherApps: true)
+        
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        
+        let selected = popup.titleOfSelectedItem ?? "System Default"
+        let micValue: String? = selected == "System Default" ? nil : selected
+        
+        // Save to config file and update in-memory
+        state.config.preferredMicrophone = micValue
+        saveConfig(state.config)
+        
+        // Apply immediately
+        state.recorder.preferredMicrophone = micValue
+        
+        showNotification("🎤 Microphone: \(selected)")
+        Log.info("🎤 Microphone preference saved: \(selected)")
+    }
+    
+    private func saveConfig(_ config: AppConfig) {
+        let configURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/typefish/config.json")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? encoder.encode(config) {
+            try? data.write(to: configURL)
         }
     }
     

@@ -10,17 +10,43 @@ import Foundation
 enum TextPolisher {
     
     /// Common patterns LLMs add that aren't part of the transcription
+    /// Only strip these when they appear as TRAILING lines after real content
     private static let garbagePatterns: [String] = [
         "Note:", "注：", "注意：", "备注：",
         "Here is", "Here's", "以上是", "以下是",
         "I hope", "希望", "如果你",
-        "Let me know", "Feel free",
         "Output:", "Result:", "Cleaned:",
         "---", "***",
         "(Note", "（注",
     ]
     
-    /// Remove trailing lines that look like LLM commentary
+    /// Known Whisper hallucinations — if the ENTIRE output matches, treat as empty
+    private static let whisperHallucinations: [String] = [
+        "Feel free to let me know",
+        "Thank you for watching",
+        "Thanks for watching",
+        "Please subscribe",
+        "Subtitles by",
+        "字幕由",
+        "谢谢观看",
+        "感谢收看",
+        "请订阅",
+        "ご視聴ありがとうございました",
+        "MBC 뉴스",
+        "www.mooji.org",
+        "Amara.org",
+    ]
+    
+    /// Check if text is a known Whisper hallucination
+    static func isHallucination(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: .punctuationCharacters)
+            .trimmingCharacters(in: .whitespaces)
+        return whisperHallucinations.contains { trimmed.hasPrefix($0) }
+    }
+    
+    /// Remove trailing lines that look like LLM commentary.
+    /// Never produces empty output — returns original if stripping would empty it.
     static func stripTrailingGarbage(_ text: String, originalLineCount: Int) -> String {
         var lines = text.components(separatedBy: "\n")
         
@@ -32,6 +58,7 @@ enum TextPolisher {
         // Check last 1-2 lines for garbage patterns
         var stripped = false
         for _ in 0..<2 {
+            guard lines.count > 1 else { break }  // Never strip the last remaining line
             guard let lastLine = lines.last?.trimmingCharacters(in: .whitespaces) else { break }
             let isGarbage = garbagePatterns.contains { lastLine.hasPrefix($0) }
             if isGarbage {
@@ -42,13 +69,14 @@ enum TextPolisher {
         }
         
         if stripped {
-            // Trim trailing empty lines again
-            while lines.last?.trimmingCharacters(in: .whitespaces).isEmpty == true {
+            while lines.last?.trimmingCharacters(in: .whitespaces).isEmpty == true && lines.count > 1 {
                 lines.removeLast()
             }
         }
         
-        return lines.joined(separator: "\n")
+        let result = lines.joined(separator: "\n")
+        // Safety: never return empty
+        return result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? text : result
     }
     
     /// Polish raw transcript text
@@ -106,6 +134,21 @@ enum TextPolisher {
         
         Input: <transcription>what is the time complexity of binary search I think it's log n right</transcription>
         Output: What is the time complexity of binary search? I think it's log n, right?
+        
+        Input: <transcription>我昨天去了那个什么来着 不对 是前天去了costco买了一些东西</transcription>
+        Output: 我前天去了 Costco 买了一些东西。
+        
+        Input: <transcription>this should use a hash map no wait actually a tree map would be better for this case</transcription>
+        Output: This should use a tree map, that would be better for this case.
+        
+        Input: <transcription>我觉得这个方案不太行 算了其实还行 就是需要再优化一下performance的部分</transcription>
+        Output: 我觉得这个方案还行，就是需要再优化一下 performance 的部分。
+        
+        Input: <transcription>我感觉现在如果我语速比较快的话它好像就不怎么加标点符号你的标点符号是按照我的停顿时间来的还是按照语义来的我就在语义方面的加标点符号和reformatting这些可以再加强一些</transcription>
+        Output: 我感觉现在如果我语速比较快的话，它好像就不怎么加标点符号。你的标点符号是按照我的停顿时间来的，还是按照语义来的？我觉得在语义方面的加标点符号和 reformatting 这些可以再加强一些。
+        
+        Input: <transcription>之前ebay的那推是不是还没有搞完把相关信息和需要的资料再给我</transcription>
+        Output: 之前 eBay 的那推是不是还没有搞完？把相关信息和需要的资料再给我。
         """
         
         // Cap max_tokens to prevent long generation
@@ -159,9 +202,9 @@ enum TextPolisher {
                     .replacingOccurrences(of: "</transcription>", with: "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 
-                // Layer 3a: Length guard — if output is >1.3x longer, LLM probably added content
+                // Layer 3a: Length guard — if output is >1.5x longer, LLM probably added content
                 let ratio = Double(polished.count) / Double(trimmed.count)
-                if ratio > 1.3 {
+                if ratio > 1.5 {
                     Log.info("⚠️ Polish output too long (\(polished.count) vs \(trimmed.count) chars, ratio \(String(format: "%.1f", ratio))x) — using raw transcription.")
                     completion(trimmed)
                     return

@@ -150,13 +150,24 @@ struct Updater {
                 
                 Log.info("📦 Update installed! Restarting...")
                 
-                // Restart the app
+                // Restart: launch a background script that waits for us to quit, then reopens
                 DispatchQueue.main.async {
+                    let appPath = currentApp.path
+                    let pid = ProcessInfo.processInfo.processIdentifier
+                    
+                    // Shell script: wait for current process to die, then open the new app
+                    let script = """
+                    while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done
+                    sleep 0.5
+                    open "\(appPath)"
+                    """
+                    
                     let task = Process()
-                    task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-                    task.arguments = [currentApp.path]
+                    task.executableURL = URL(fileURLWithPath: "/bin/bash")
+                    task.arguments = ["-c", script]
                     try? task.run()
                     
+                    // Quit current app
                     NSApp.terminate(nil)
                 }
                 

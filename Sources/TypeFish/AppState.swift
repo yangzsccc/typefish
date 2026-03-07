@@ -15,8 +15,8 @@ class AppState: ObservableObject {
     /// Public accessor for menu bar icon
     var isTranslateMode: Bool { translateMode }
     
-    let config: AppConfig
-    let recorder = AudioRecorder()
+    var config: AppConfig
+    let recorder: AudioRecorder
     let groqAPIKey: String?
     
     /// Custom dictionary for vocabulary hints and replacements
@@ -38,6 +38,8 @@ class AppState: ObservableObject {
     
     init() {
         self.config = AppConfig.load()
+        self.recorder = AudioRecorder()
+        self.recorder.preferredMicrophone = config.preferredMicrophone
         self.groqAPIKey = AppState.loadAPIKey()
         self.dictionary = CustomDictionary.load()
         
@@ -172,6 +174,14 @@ class AppState: ObservableObject {
             return
         }
         
+        // Trim trailing silence to prevent Whisper hallucination
+        let processURL: URL
+        if let trimmedURL = AudioRecorder.trimTrailingSilence(fileURL: audioURL) {
+            processURL = trimmedURL
+        } else {
+            processURL = audioURL
+        }
+        
         isProcessing = true
         statusText = "⏳ Transcribing..."
         onStateChange?()
@@ -199,10 +209,29 @@ class AppState: ObservableObject {
                     self.isProcessing = false
                     self.statusText = "❌ No speech detected"
                     self.onStateChange?()
+                    self.overlay.dismiss()
                 }
                 self.cleanup(audioURL)
+                if processURL != audioURL { self.cleanup(processURL) }
                 return
             }
+            
+            // Check for known Whisper hallucinations
+            if TextPolisher.isHallucination(rawText) {
+                Log.info("🔇 Whisper hallucination detected: \(rawText.prefix(50))...")
+                DispatchQueue.main.async {
+                    self.isProcessing = false
+                    self.statusText = "🔇 No speech detected"
+                    self.onStateChange?()
+                    self.overlay.dismiss()
+                }
+                self.cleanup(audioURL)
+                if processURL != audioURL { self.cleanup(processURL) }
+                return
+            }
+            
+            // Save raw text for logging
+            let whisperRawText = rawText
             
             // Apply dictionary replacements
             let correctedText = self.dictionary.applyReplacements(rawText)
@@ -226,6 +255,16 @@ class AppState: ObservableObject {
                 systemPrompt: fullSystemPrompt
             ) { polishedText in
                 DispatchQueue.main.async {
+                    // Safety: don't paste empty text
+                    guard !polishedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        Log.info("⚠️ Polished text was empty, skipping paste")
+                        self.isProcessing = false
+                        self.statusText = "🔇 No speech detected"
+                        self.onStateChange?()
+                        self.overlay.dismiss()
+                        return
+                    }
+                    
                     // Try to paste to cursor
                     let pasted = PasteService.paste(polishedText)
                     
@@ -249,16 +288,27 @@ class AppState: ObservableObject {
                     }
                 }
                 
+                // Log transcription for evolution pipeline
+                TranscriptionLogger.log(
+                    audioURL: audioURL,
+                    whisperRaw: whisperRawText,
+                    polished: polishedText,
+                    mode: isTranslating ? "translate" : "transcribe",
+                    whisperModel: self.config.whisperModel,
+                    polisherModel: self.config.polisherModel
+                )
+                
                 self.cleanup(audioURL)
+                if processURL != audioURL { self.cleanup(processURL) }
             }
         }
         
         // Call the appropriate Whisper endpoint
         if isTranslating {
             Log.info("🌐 Translate mode: will translate to English")
-            WhisperAPI.translate(fileURL: audioURL, apiKey: apiKey, model: config.whisperModel, prompt: vocabPrompt, completion: whisperCallback)
+            WhisperAPI.translate(fileURL: processURL, apiKey: apiKey, model: config.whisperModel, prompt: vocabPrompt, completion: whisperCallback)
         } else {
-            WhisperAPI.transcribe(fileURL: audioURL, apiKey: apiKey, model: config.whisperModel, language: config.whisperLanguage, prompt: vocabPrompt, completion: whisperCallback)
+            WhisperAPI.transcribe(fileURL: processURL, apiKey: apiKey, model: config.whisperModel, language: config.whisperLanguage, prompt: vocabPrompt, completion: whisperCallback)
         }
     }
     
