@@ -312,8 +312,48 @@ def cmd_analyze():
     print(f"\n💾 Analysis saved to {analysis_file}")
 
 
+def gold_polish(text, api_key, model=GOLD_MODEL):
+    """Polish text through the gold-standard LLM (no audio replay needed)."""
+    import requests
+
+    if not text or not text.strip():
+        return None
+
+    resp = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": GOLD_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": f"<transcription>\n{text.strip()}\n</transcription>\n\nClean up the transcription above. Output ONLY the cleaned text.",
+                },
+            ],
+            "temperature": 0.1,
+            "max_tokens": max(len(text) * 2, 500),
+        },
+        timeout=15,
+    )
+
+    if resp.status_code != 200:
+        return None
+
+    data = resp.json()
+    return (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+        .strip()
+    )
+
+
 def cmd_replay():
-    """Replay recent audio through gold-standard pipeline."""
+    """Re-polish logged Whisper output through gold-standard LLM."""
     entries = load_log()
     if not entries:
         print("📭 No transcription logs yet.")
@@ -321,22 +361,23 @@ def cmd_replay():
 
     api_key = get_api_key()
 
-    # Only replay entries without gold comparison
-    to_replay = [e for e in entries if not e.get("gold_polished")]
+    # Only process entries without gold comparison
+    to_replay = [e for e in entries if not e.get("gold_polished") and e.get("whisper_raw", "").strip()]
     if not to_replay:
         print("✅ All entries already have gold-standard comparison.")
         return
 
-    print(f"🔄 Replaying {len(to_replay)} entries through {GOLD_MODEL}...")
+    print(f"🔄 Re-polishing {len(to_replay)} entries through {GOLD_MODEL}...")
+    import time
 
     updated = 0
-    for i, entry in enumerate(to_replay[:20]):  # Max 20 per run to avoid rate limits
-        audio_file = AUDIO_DIR / entry.get("audio_file", "")
-        if not audio_file.exists():
+    for i, entry in enumerate(to_replay[:30]):  # Max 30 per run
+        raw = entry.get("whisper_raw", "").strip()
+        if not raw or len(raw) < 3:
             continue
 
-        print(f"  [{i+1}/{min(len(to_replay), 20)}] {entry['audio_file']}...", end=" ")
-        raw, polished = replay_audio(audio_file, api_key)
+        print(f"  [{i+1}/{min(len(to_replay), 30)}] {raw[:50]}...", end=" ")
+        polished = gold_polish(raw, api_key)
 
         if polished:
             entry["gold_polished"] = polished
@@ -344,7 +385,9 @@ def cmd_replay():
             updated += 1
             print("✅")
         else:
-            print("⏭️ skipped")
+            print("⏭️")
+
+        time.sleep(0.5)  # Rate limit courtesy
 
     # Update entries in the main list
     entry_map = {e.get("audio_file"): e for e in to_replay}

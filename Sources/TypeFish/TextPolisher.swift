@@ -127,28 +127,31 @@ enum TextPolisher {
         Examples:
         
         Input: <transcription>帮我写一个Python脚本来做数据分析</transcription>
-        Output: 帮我写一个 Python 脚本来做数据分析。
-        
-        Input: <transcription>嗯那个根据这个里面的面筋给我制定一个准备Vemo面试DSA的训练计划</transcription>
-        Output: 根据这个里面的面经，给我制定一个准备 Vemo 面试 DSA 的训练计划。
+        Output: 帮我写一个Python脚本来做数据分析。
         
         Input: <transcription>what is the time complexity of binary search I think it's log n right</transcription>
         Output: What is the time complexity of binary search? I think it's log n, right?
         
         Input: <transcription>我昨天去了那个什么来着 不对 是前天去了costco买了一些东西</transcription>
-        Output: 我前天去了 Costco 买了一些东西。
+        Output: 我前天去了Costco买了一些东西。
         
         Input: <transcription>this should use a hash map no wait actually a tree map would be better for this case</transcription>
         Output: This should use a tree map, that would be better for this case.
         
-        Input: <transcription>我觉得这个方案不太行 算了其实还行 就是需要再优化一下performance的部分</transcription>
-        Output: 我觉得这个方案还行，就是需要再优化一下 performance 的部分。
+        Input: <transcription>把FaceSwamp这个Channel的名字改一下这是一个比较敏感的任务这个名字感觉会reveal一些信息你改成一些很不引人注目的很普通的名字</transcription>
+        Output: 把FaceSwamp这个Channel的名字改一下，这是一个比较敏感的任务。这个名字感觉会reveal一些信息，你改成一些很不引人注目的，很普通的名字。
+        
+        Input: <transcription>你来帮我跑吧你分析一下我给的这些照片哪一些照片是比较好的candidate选5到10张然后我告诉你具体选哪张</transcription>
+        Output: 你来帮我跑吧，你分析一下我给的这些照片，哪一些照片是比较好的candidate，选5到10张，然后我告诉你具体选哪张。
+        
+        Input: <transcription>前十秒没有什么人物的正点你去用从第15秒到第32秒之间做测试</transcription>
+        Output: 前十秒没有什么人物的正点，你去用从第15秒到第32秒之间做测试。
         
         Input: <transcription>我感觉现在如果我语速比较快的话它好像就不怎么加标点符号你的标点符号是按照我的停顿时间来的还是按照语义来的我就在语义方面的加标点符号和reformatting这些可以再加强一些</transcription>
-        Output: 我感觉现在如果我语速比较快的话，它好像就不怎么加标点符号。你的标点符号是按照我的停顿时间来的，还是按照语义来的？我觉得在语义方面的加标点符号和 reformatting 这些可以再加强一些。
+        Output: 我感觉现在如果我语速比较快的话，它好像就不怎么加标点符号。你的标点符号是按照我的停顿时间来的，还是按照语义来的？我觉得在语义方面的加标点符号和reformatting这些可以再加强一些。
         
-        Input: <transcription>之前ebay的那推是不是还没有搞完把相关信息和需要的资料再给我</transcription>
-        Output: 之前 eBay 的那推是不是还没有搞完？把相关信息和需要的资料再给我。
+        Input: <transcription>你有提到SecretKey永远不在API请求中传输那当在onboarding的时候我们生成了这个Key是怎么样让merchant拿到的</transcription>
+        Output: 你有提到SecretKey永远不在API请求中传输，那当在onboarding的时候，我们生成了这个Key是怎么样让merchant拿到的？
         """
         
         // Cap max_tokens to prevent long generation
