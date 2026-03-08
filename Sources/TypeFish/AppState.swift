@@ -122,13 +122,24 @@ class AppState: ObservableObject {
             self?.overlay.updateAudioLevel(rms)
         }
         
-        let success = recorder.startRecording()
-        if success {
-            isRecording = true
-            statusText = translateMode ? "🌐 Recording (Translate)..." : "🔴 Recording..."
-            onStateChange?()
-            startSound?.play()
-            overlay.showRecording(translate: translateMode)
+        // Start recording off main thread to avoid blocking the event tap.
+        // Audio HAL operations (device enumeration, engine start) can block
+        // during device transitions (e.g. headphone disconnect).
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let success = self.recorder.startRecording()
+            DispatchQueue.main.async {
+                if success {
+                    self.isRecording = true
+                    self.statusText = self.translateMode ? "🌐 Recording (Translate)..." : "🔴 Recording..."
+                    self.onStateChange?()
+                    self.startSound?.play()
+                    self.overlay.showRecording(translate: self.translateMode)
+                } else {
+                    Log.info("❌ Failed to start recording")
+                    self.overlay.dismiss()
+                }
+            }
         }
     }
     

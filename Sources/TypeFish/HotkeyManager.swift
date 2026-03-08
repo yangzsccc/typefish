@@ -8,7 +8,6 @@ class HotkeyManager {
     
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    private var watchdogTimer: Timer?
     
     /// Called when the hotkey is pressed (Option+Space)
     var onToggle: (() -> Void)?
@@ -56,15 +55,6 @@ class HotkeyManager {
         CGEvent.tapEnable(tap: tap, enable: true)
         
         Log.info("✅ Hotkey active: Option+Space to toggle recording")
-        
-        // Watchdog: periodically check if event tap is still alive
-        watchdogTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            guard let self = self, let tap = self.eventTap else { return }
-            if !CGEvent.tapIsEnabled(tap: tap) {
-                Log.info("🔧 Watchdog: re-enabling event tap")
-                CGEvent.tapEnable(tap: tap, enable: true)
-            }
-        }
     }
     
     /// C callback for CGEvent tap
@@ -115,8 +105,6 @@ class HotkeyManager {
     }
     
     func stop() {
-        watchdogTimer?.invalidate()
-        watchdogTimer = nil
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
         }
