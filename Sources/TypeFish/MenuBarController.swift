@@ -113,6 +113,12 @@ class MenuBarController {
         
         menu.addItem(NSMenuItem.separator())
         
+        let pairTypelessItem = NSMenuItem(title: "📋 Pair Typeless Result", action: #selector(pairTypelessResult), keyEquivalent: "t")
+        pairTypelessItem.target = self
+        menu.addItem(pairTypelessItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        
         let versionItem = NSMenuItem(title: "v\(Updater.currentVersion)", action: nil, keyEquivalent: "")
         versionItem.isEnabled = false
         menu.addItem(versionItem)
@@ -286,6 +292,55 @@ class MenuBarController {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                 button.toolTip = prev
             }
+        }
+    }
+    
+    @objc private func pairTypelessResult() {
+        // Read clipboard
+        guard let clipboard = NSPasteboard.general.string(forType: .string),
+              !clipboard.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            showNotification("📋 Clipboard is empty — copy a Typeless result first")
+            return
+        }
+        
+        // Pair with most recent log entry
+        let logFile = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/typefish/logs/transcriptions.jsonl")
+        
+        guard let content = try? String(contentsOf: logFile, encoding: .utf8) else {
+            showNotification("❌ No transcription logs found")
+            return
+        }
+        
+        var lines = content.split(separator: "\n", omittingEmptySubsequences: true)
+            .map(String.init)
+        
+        // Find most recent entry without typeless result
+        var paired = false
+        for i in stride(from: lines.count - 1, through: max(0, lines.count - 5), by: -1) {
+            guard var entry = try? JSONSerialization.jsonObject(with: Data(lines[i].utf8)) as? [String: Any] else { continue }
+            
+            let existing = entry["typeless_result"] as? String ?? ""
+            if existing.isEmpty {
+                entry["typeless_result"] = clipboard
+                if let updated = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys]),
+                   let updatedStr = String(data: updated, encoding: .utf8) {
+                    lines[i] = updatedStr
+                    paired = true
+                    
+                    let whisper = (entry["whisper_raw"] as? String ?? "").prefix(40)
+                    Log.info("📋 Paired Typeless result with: \(whisper)...")
+                    showNotification("✅ Paired with: \(whisper)...")
+                    break
+                }
+            }
+        }
+        
+        if paired {
+            let output = lines.joined(separator: "\n") + "\n"
+            try? output.write(to: logFile, atomically: true, encoding: .utf8)
+        } else {
+            showNotification("⚠️ No recent entry to pair — use TypeFish first")
         }
     }
     
