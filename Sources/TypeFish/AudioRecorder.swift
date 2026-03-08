@@ -6,13 +6,19 @@ import ObjCExceptionCatcher
 /// Tracks peak audio level to detect silence.
 class AudioRecorder {
     
-    private let audioEngine = AVAudioEngine()
+    private var audioEngine = AVAudioEngine()
     private var audioFile: AVAudioFile?
     private var outputURL: URL?
     private(set) var isRecording = false
     
     /// Preferred microphone identifier (partial match on ID or name)
     var preferredMicrophone: String? = nil
+    
+    /// Listener ID for audio device changes
+    private var deviceChangeListenerID: AudioObjectPropertyListenerBlock?
+    
+    /// Called when audio device changes (for UI recovery)
+    var onDeviceChange: (() -> Void)?
     
     /// Peak RMS level during recording (0.0 = silence, 1.0 = max)
     private(set) var peakRMSLevel: Float = 0.0
@@ -123,6 +129,9 @@ class AudioRecorder {
         audioEngine.inputNode.removeTap(onBus: 0)
         audioFile = nil
         isRecording = false
+        
+        // Recreate engine for clean state on next recording
+        audioEngine = AVAudioEngine()
         
         guard let url = outputURL else { return nil }
         
@@ -367,6 +376,48 @@ class AudioRecorder {
         )
         if status != noErr {
             Log.info("⚠️ Failed to set input device (error: \(status))")
+        }
+    }
+    
+    /// Start listening for audio device changes (connect/disconnect headphones etc.)
+    func startDeviceChangeListener() {
+        var propAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self = self else { return }
+            Log.info("🔄 Audio input device changed")
+            
+            if self.isRecording {
+                // If we're recording, stop gracefully — the recording is likely corrupted anyway
+                Log.info("⚠️ Device changed during recording — stopping")
+                DispatchQueue.main.async {
+                    _ = self.stopRecording()
+                    self.onDeviceChange?()
+                }
+            } else {
+                // Reset engine to pick up new device on next recording
+                self.audioEngine.reset()
+                self.audioEngine = AVAudioEngine()
+                Log.info("🔄 Audio engine recreated for new device")
+            }
+        }
+        
+        let status = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &propAddress,
+            DispatchQueue.main,
+            listener
+        )
+        
+        if status == noErr {
+            self.deviceChangeListenerID = listener
+            Log.info("👂 Listening for audio device changes")
+        } else {
+            Log.info("⚠️ Failed to add device change listener (error: \(status))")
         }
     }
     

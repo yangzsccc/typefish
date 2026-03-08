@@ -41,6 +41,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         hotkeyManager.start()
         
+        // Listen for audio device changes (headphone connect/disconnect)
+        state.recorder.onDeviceChange = { [weak self] in
+            guard let self = self else { return }
+            if self.state.isRecording {
+                self.state.cancelRecording()
+                Log.info("⚠️ Recording cancelled due to device change")
+            }
+        }
+        state.recorder.startDeviceChangeListener()
+        
         Log.info("🐟 TypeFish ready! Press Option+Space to start dictating.")
         
         // Clean up old transcription logs (keep 7 days)
