@@ -53,7 +53,12 @@ cat > TypeFish.app/Contents/Info.plist << 'PLIST'
 PLIST
 
 # Code sign (preserves Accessibility permission across rebuilds)
-codesign --force --deep --sign "Local Dev Signing" "TypeFish.app" 2>&1
+# Try named certificate first, fall back to ad-hoc signing
+if security find-identity -v -p codesigning | grep -q "Local Dev Signing"; then
+    codesign --force --deep --sign "Local Dev Signing" "TypeFish.app" 2>&1
+else
+    codesign --force --deep --sign - "TypeFish.app" 2>&1
+fi
 echo "✅ Built & signed: $(pwd)/TypeFish.app"
 echo "📋 Next steps:"
 echo "   1. Double-click TypeFish.app to launch"
