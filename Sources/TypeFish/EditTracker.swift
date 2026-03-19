@@ -26,6 +26,11 @@ class EditTracker {
     private var apiKey: String?
     private weak var appState: AppState?
     
+    /// Debounce: wait for text to stabilize before analyzing
+    private var lastChangeTime: Date?
+    private var lastFieldContent: String?
+    private let stabilizeDelay: TimeInterval = 3  // seconds of no changes before analyzing
+    
     /// Prevent tracking during certain states
     private var isAnalyzing = false
     
@@ -43,32 +48,11 @@ class EditTracker {
         // Skip very short text (not worth tracking)
         guard pastedText.count >= 4 else { return }
         
-        // Brief delay to let paste settle into the text field
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            guard let self = self else { return }
-            
-            // Verify we can read the field and our text is there
-            guard let fieldContent = ContextReader.readFullContent() else {
-                Log.info("📝 EditTracker: cannot read field, skipping")
-                return
-            }
-            
-            guard fieldContent.contains(pastedText) else {
-                Log.info("📝 EditTracker: pasted text not found in field, skipping")
-                return
-            }
-            
-            self.trackedText = pastedText
-            self.trackingStartTime = Date()
-            self.apiKey = apiKey
-            self.appState = appState
-            
-            Log.info("📝 EditTracker: monitoring \(pastedText.count) chars for \(Int(self.trackingDuration))s")
-            
-            self.timer = Timer.scheduledTimer(withTimeInterval: self.pollInterval, repeats: true) { [weak self] _ in
-                self?.pollForEdits()
-            }
-        }
+        // Delay to let paste settle, then try to verify with retries
+        self.trackedText = pastedText
+        self.apiKey = apiKey
+        self.appState = appState
+        self.verifyAndStartPolling(pastedText: pastedText, attempt: 1)
     }
     
     /// Stop tracking (called on timeout, new recording, or edit detected)
@@ -79,58 +63,136 @@ class EditTracker {
         trackingStartTime = nil
         apiKey = nil
         appState = nil
+        lastChangeTime = nil
+        lastFieldContent = nil
+    }
+    
+    // MARK: - Startup Verification
+    
+    private let maxVerifyAttempts = 3
+    private let verifyInterval: TimeInterval = 0.8  // seconds between retries
+    
+    private func verifyAndStartPolling(pastedText: String, attempt: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + verifyInterval) { [weak self] in
+            guard let self = self, self.trackedText != nil else { return }
+            
+            let fieldContent = ContextReader.readFullContent()
+            
+            if let content = fieldContent, content.contains(pastedText) {
+                // Found our text — start normal tracking
+                self.trackingStartTime = Date()
+                Log.info("📝 EditTracker: verified text in field (attempt \(attempt)), monitoring \(pastedText.count) chars")
+                self.startPollingTimer()
+                return
+            }
+            
+            if attempt < self.maxVerifyAttempts {
+                // Retry — app might not have rendered the paste yet
+                Log.info("📝 EditTracker: text not found yet (attempt \(attempt)/\(self.maxVerifyAttempts)), retrying...")
+                self.verifyAndStartPolling(pastedText: pastedText, attempt: attempt + 1)
+                return
+            }
+            
+            // All retries exhausted — check if we can read the field at all
+            if fieldContent != nil {
+                // We CAN read the field, but our text isn't there
+                // (common with Electron apps like Discord, Slack, VS Code)
+                // Start tracking anyway — compare against pasted text directly
+                self.trackingStartTime = Date()
+                Log.info("📝 EditTracker: text not verified but field readable, monitoring in relaxed mode")
+                self.startPollingTimer()
+            } else {
+                // Can't read the field at all — give up
+                Log.info("📝 EditTracker: cannot read field after \(self.maxVerifyAttempts) attempts, skipping")
+                self.stopTracking()
+            }
+        }
+    }
+    
+    private func startPollingTimer() {
+        self.timer = Timer.scheduledTimer(withTimeInterval: self.pollInterval, repeats: true) { [weak self] _ in
+            self?.pollForEdits()
+        }
     }
     
     // MARK: - Polling
     
     private func pollForEdits() {
-        // Check timeout
-        guard let startTime = trackingStartTime,
-              Date().timeIntervalSince(startTime) < trackingDuration else {
-            Log.info("📝 EditTracker: timeout, no edit detected")
-            stopTracking()
-            return
-        }
-        
         guard let tracked = trackedText else {
             stopTracking()
             return
         }
         
+        // Check total timeout
+        guard let startTime = trackingStartTime,
+              Date().timeIntervalSince(startTime) < trackingDuration else {
+            // Timeout — if there's a pending stable edit, analyze it
+            if let lastContent = lastFieldContent, lastChangeTime != nil {
+                Log.info("📝 EditTracker: timeout with pending edit, analyzing")
+                triggerAnalysis(pastedText: tracked, editedField: lastContent)
+            } else {
+                Log.info("📝 EditTracker: timeout, no edit detected")
+                stopTracking()
+            }
+            return
+        }
+        
         // Read current field content
         guard let currentContent = ContextReader.readFullContent() else {
-            // Lost focus or app switched
             Log.info("📝 EditTracker: lost focus, stopping")
             stopTracking()
             return
         }
         
-        // Field cleared — user deleted everything
+        // Field cleared
         guard !currentContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             Log.info("📝 EditTracker: field cleared, stopping")
             stopTracking()
             return
         }
         
-        // Content drastically different (>80% removed) — not a correction
-        if currentContent.count < tracked.count / 5 {
-            Log.info("📝 EditTracker: large change, not a correction")
+        // Content drastically different — but only for longer texts
+        // Short texts (< 20 chars) can legitimately change a lot with one word edit
+        if tracked.count > 20 && currentContent.count < tracked.count / 5 {
+            Log.info("📝 EditTracker: large change (\(currentContent.count) vs \(tracked.count)), not a correction")
             stopTracking()
             return
         }
         
-        // If pasted text still present verbatim, no edit yet
+        // If pasted text still present verbatim, no edit yet — reset debounce
         if currentContent.contains(tracked) {
+            lastChangeTime = nil
+            lastFieldContent = nil
             return
         }
         
-        // Edit detected!
-        Log.info("📝 EditTracker: edit detected!")
+        // Text has changed! But don't analyze immediately — debounce.
+        let now = Date()
         
+        // If content changed since last poll, reset the stability timer
+        if lastFieldContent != currentContent {
+            if lastFieldContent == nil {
+                Log.info("📝 EditTracker: edit started, waiting for user to finish...")
+            }
+            lastChangeTime = now
+            lastFieldContent = currentContent
+            return  // Keep polling, user is still editing
+        }
+        
+        // Content same as last poll — check if stable long enough
+        guard let changeTime = lastChangeTime else { return }
+        
+        if now.timeIntervalSince(changeTime) >= stabilizeDelay {
+            // Text has been stable for 3+ seconds — user is done editing
+            Log.info("📝 EditTracker: edit stabilized after \(String(format: "%.1f", now.timeIntervalSince(changeTime)))s")
+            triggerAnalysis(pastedText: tracked, editedField: currentContent)
+        }
+        // Otherwise: still waiting for stability
+    }
+    
+    private func triggerAnalysis(pastedText: String, editedField: String) {
         let savedKey = apiKey ?? ""
         let savedAppState = appState
-        let pastedText = tracked
-        let editedField = currentContent
         
         stopTracking()
         
@@ -215,7 +277,7 @@ class EditTracker {
         }
         request.httpBody = jsonData
         
-        Log.info("📝 EditTracker: analyzing correction with LLM...")
+        Log.info("📝 EditTracker: analyzing — original=[\(pastedText)] field=[\(String(cappedField.prefix(100)))]")
         
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             defer { self?.isAnalyzing = false }
