@@ -92,7 +92,14 @@ struct CustomDictionary: Codable {
         
         guard !words.isEmpty else { return nil }
         
-        let prompt = prefix + words.joined(separator: ", ")
+        var prompt = prefix + words.joined(separator: ", ")
+        
+        // Safety guard: hard-cap at 896 chars (Groq limit)
+        // This catches edge cases where character counting differs from API
+        if prompt.count > 896 {
+            Log.info("⚠️ Whisper prompt over 896 (\(prompt.count)), truncating")
+            prompt = String(prompt.prefix(896))
+        }
         
         if words.count < hints.count {
             Log.info("📖 Whisper hints: \(words.count)/\(hints.count) (\(prompt.count) chars)")

@@ -40,6 +40,9 @@ class AppState: ObservableObject {
         self.config = AppConfig.load()
         self.recorder = AudioRecorder()
         self.recorder.preferredMicrophone = config.preferredMicrophone
+        // Lock preferred mic as system default BEFORE any engine access
+        // This prevents Bluetooth headphones from being activated as input
+        self.recorder.lockPreferredMicrophone()
         self.groqAPIKey = AppState.loadAPIKey()
         self.dictionary = CustomDictionary.load()
         
@@ -114,8 +117,18 @@ class AppState: ObservableObject {
             return
         }
         
+        // Stop any edit tracking from previous recording
+        EditTracker.shared.stopTracking()
+        
         // Save reference to the app user is typing in BEFORE we do anything
         PasteService.saveFrontmostApp()
+        
+        // Show UI IMMEDIATELY — don't wait for engine startup
+        isRecording = true
+        statusText = translateMode ? "🌐 Recording (Translate)..." : "🔴 Recording..."
+        onStateChange?()
+        startSound?.play()
+        overlay.showRecording(translate: translateMode)
         
         // Wire up audio level to overlay
         recorder.onAudioLevel = { [weak self] rms in
@@ -128,15 +141,12 @@ class AppState: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             let success = self.recorder.startRecording()
-            DispatchQueue.main.async {
-                if success {
-                    self.isRecording = true
-                    self.statusText = self.translateMode ? "🌐 Recording (Translate)..." : "🔴 Recording..."
-                    self.onStateChange?()
-                    self.startSound?.play()
-                    self.overlay.showRecording(translate: self.translateMode)
-                } else {
+            if !success {
+                DispatchQueue.main.async {
                     Log.info("❌ Failed to start recording")
+                    self.isRecording = false
+                    self.statusText = "Ready"
+                    self.onStateChange?()
                     self.overlay.dismiss()
                 }
             }
@@ -144,11 +154,14 @@ class AppState: ObservableObject {
     }
     
     private func stopAndProcess() {
-        // Brief delay after pressing stop to capture trailing speech
+        // Update UI immediately on stop press
         isRecording = false
-        statusText = "⏳ Finishing..."
+        stopSound?.play()
+        statusText = "⏳ Processing..."
         onStateChange?()
+        overlay.showProcessing()
         
+        // Brief delay after pressing stop to capture trailing speech
         Log.info("⏱️ Recording tail buffer (400ms)...")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
             guard let self = self else {
@@ -166,9 +179,6 @@ class AppState: ObservableObject {
             onStateChange?()
             return
         }
-        
-        // Always play stop sound when recording ends
-        stopSound?.play()
         
         // Check if audio was silence (prevent Whisper hallucination)
         if recorder.wasSilent() {
@@ -207,6 +217,9 @@ class AppState: ObservableObject {
             cleanup(audioURL)
             return
         }
+        
+        // Read context from current text field (before transcription starts)
+        let fieldContext = ContextReader.readContext()
         
         // Pipeline: Transcribe/Translate → Polish → Paste
         let vocabPrompt = dictionary.whisperPrompt()
@@ -252,10 +265,13 @@ class AppState: ObservableObject {
                 self.onStateChange?()
             }
             
-            // Build polisher prompt with dictionary reference
+            // Build polisher prompt with dictionary reference + field context
             var fullSystemPrompt = self.config.polisherSystemPrompt
             if let ref = self.dictionary.polisherReference() {
                 fullSystemPrompt += "\n\n" + ref
+            }
+            if let ctx = fieldContext, !ctx.isEmpty {
+                fullSystemPrompt += "\n\nThe user is typing into a text field that already contains the following text (before the cursor). Use this context to make the new transcription flow naturally — match the tone, avoid repeating what's already written, and connect smoothly:\n<existing_text>\n\(ctx)\n</existing_text>"
             }
             
             // Polish the transcript
@@ -266,8 +282,12 @@ class AppState: ObservableObject {
                 systemPrompt: fullSystemPrompt
             ) { polishedText in
                 DispatchQueue.main.async {
+                    // Apply reverse replacements AFTER polishing
+                    // Catches cases where polisher translates English to Chinese
+                    let finalText = self.dictionary.applyReplacements(polishedText)
+                    
                     // Safety: don't paste empty text
-                    guard !polishedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    guard !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                         Log.info("⚠️ Polished text was empty, skipping paste")
                         self.isProcessing = false
                         self.statusText = "🔇 No speech detected"
@@ -277,7 +297,7 @@ class AppState: ObservableObject {
                     }
                     
                     // Try to paste to cursor
-                    let pasted = PasteService.paste(polishedText)
+                    let pasted = PasteService.paste(finalText)
                     
                     self.isProcessing = false
                     self.statusText = "✅ Done"
@@ -285,9 +305,18 @@ class AppState: ObservableObject {
                     
                     if pasted {
                         self.overlay.showDone()
+                        
+                        // Start edit tracking for auto-dictionary learning
+                        if let key = self.groqAPIKey {
+                            EditTracker.shared.startTracking(
+                                pastedText: finalText,
+                                apiKey: key,
+                                appState: self
+                            )
+                        }
                     } else {
                         // No text input focused — show result panel with copy button
-                        self.overlay.showResult(polishedText)
+                        self.overlay.showResult(finalText)
                     }
                     
                     // Reset status after 2 seconds
@@ -306,7 +335,8 @@ class AppState: ObservableObject {
                     polished: polishedText,
                     mode: isTranslating ? "translate" : "transcribe",
                     whisperModel: self.config.whisperModel,
-                    polisherModel: self.config.polisherModel
+                    polisherModel: self.config.polisherModel,
+                    fieldContext: fieldContext
                 )
                 
                 self.cleanup(audioURL)

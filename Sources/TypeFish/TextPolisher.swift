@@ -79,12 +79,16 @@ enum TextPolisher {
         return result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? text : result
     }
     
+    /// Fallback model when primary hits rate limit
+    private static let fallbackModel = "llama-3.1-8b-instant"
+    
     /// Polish raw transcript text
     static func polish(
         text: String,
         apiKey: String,
         model: String = "llama-3.3-70b-versatile",
         systemPrompt: String,
+        isFallback: Bool = false,
         completion: @escaping (String) -> Void
     ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -152,6 +156,33 @@ enum TextPolisher {
         
         Input: <transcription>你有提到SecretKey永远不在API请求中传输那当在onboarding的时候我们生成了这个Key是怎么样让merchant拿到的</transcription>
         Output: 你有提到SecretKey永远不在API请求中传输，那当在onboarding的时候，我们生成了这个Key是怎么样让merchant拿到的？
+        
+        Input: <transcription>hi Eric that sounds great I have submitted the application and looking forward to the next step best Shuchen</transcription>
+        Output: Hi Eric,
+
+        That sounds great. I have submitted the application and looking forward to the next step.
+
+        Best,
+        Shuchen
+
+        Input: <transcription>帮我draft一个给Airbnb内推人的中文的信息包含我要投的岗位对应的简历然后第三人称自我介绍这会是一个微信的message这个人我关系还算比较熟不是陌生人</transcription>
+        Output: 帮我draft一个给Airbnb内推人的中文信息，包含：
+        1. 我要投的岗位
+        2. 对应的简历
+        3. 第三人称自我介绍
+
+        这会是一个微信的message，这个人我关系还算比较熟，不是陌生人。
+
+        Input: <transcription>我不知道你是怎么判断简历的版本的但是我觉得像这个岗位明显是与AI Infra相关的你为什么选择用Data Infra的那个basic template而没有用我的ML Ops的那个template呢我觉得那个更合适</transcription>
+        Output: 我不知道你是怎么判断简历版本的，但是我觉得像这个岗位明显是与AI Infra相关的。
+
+        你为什么选择用Data Infra的那个basic template，而没有用我的ML Ops的那个template呢？我觉得那个更合适。
+
+        Input: <transcription>我们首先需要知道对于senior candidate更容易被问到哪些方面的behavior question并且保证我们准备好的story无论是从stakeholder还是impact都必须得是senior plus level</transcription>
+        Output: 我们首先需要知道对于senior candidate更容易被问到哪些方面的behavior question，并且保证我们准备好的story，无论是从stakeholder还是impact角度，都必须得是senior plus level。
+
+        Input: <transcription>这个是我直接得到的面试的feedback和自己的感悟但我不知道怎么样能够通过这些感悟convert成一个更好的behavior question preparation doc</transcription>
+        Output: 这个是我直接得到的面试的feedback和自己的感悟，但我不知道怎么样能够通过这些感悟convert成一个更好的behavior question preparation doc。
         """
         
         // Cap max_tokens to prevent long generation
@@ -192,6 +223,13 @@ enum TextPolisher {
                 return
             }
             
+            // Check for rate limit (429) — fallback to smaller model
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 429, !isFallback {
+                Log.info("⚠️ Rate limited on \(model), falling back to \(fallbackModel)")
+                polish(text: text, apiKey: apiKey, model: fallbackModel, systemPrompt: systemPrompt, isFallback: true, completion: completion)
+                return
+            }
+            
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let choices = json["choices"] as? [[String: Any]],
                let first = choices.first,
@@ -205,9 +243,10 @@ enum TextPolisher {
                     .replacingOccurrences(of: "</transcription>", with: "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 
-                // Layer 3a: Length guard — if output is >1.5x longer, LLM probably added content
+                // Layer 3a: Length guard — if output is >1.8x longer, LLM probably added content
+                // (1.8x instead of 1.5x to allow email formatting with line breaks)
                 let ratio = Double(polished.count) / Double(trimmed.count)
-                if ratio > 1.5 {
+                if ratio > 1.8 {
                     Log.info("⚠️ Polish output too long (\(polished.count) vs \(trimmed.count) chars, ratio \(String(format: "%.1f", ratio))x) — using raw transcription.")
                     completion(trimmed)
                     return
@@ -216,7 +255,8 @@ enum TextPolisher {
                 // Layer 3b: Strip trailing LLM commentary lines
                 polished = TextPolisher.stripTrailingGarbage(polished, originalLineCount: trimmed.components(separatedBy: "\n").count)
                 
-                Log.info("✅ Polished (\(String(format: "%.1f", elapsed))s): \(polished.prefix(100))...")
+                let modelTag = isFallback ? " [fallback:\(model)]" : ""
+                Log.info("✅ Polished (\(String(format: "%.1f", elapsed))s)\(modelTag): \(polished.prefix(100))...")
                 completion(polished)
             } else {
                 let responseStr = String(data: data, encoding: .utf8) ?? "unknown"

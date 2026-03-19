@@ -29,7 +29,8 @@ enum TranscriptionLogger {
         mode: String,  // "transcribe" or "translate"
         whisperModel: String,
         polisherModel: String,
-        durationMs: Int? = nil
+        durationMs: Int? = nil,
+        fieldContext: String? = nil
     ) {
         let timestamp = ISO8601DateFormatter().string(from: Date())
         let audioFilename = audioURL.lastPathComponent
@@ -48,7 +49,8 @@ enum TranscriptionLogger {
             "whisper_model": whisperModel,
             "polisher_model": polisherModel,
             "duration_ms": durationMs ?? 0,
-            "typeless_result": ""  // filled later via comparison tool
+            "typeless_result": "",  // filled later via comparison tool
+            "field_context": fieldContext ?? ""
         ]
         
         guard let jsonData = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys]),

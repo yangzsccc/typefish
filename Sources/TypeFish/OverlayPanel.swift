@@ -253,6 +253,125 @@ class OverlayPanel {
         }
     }
     
+    // MARK: - Auto-Learn Notification
+    
+    private var learnWindow: NSPanel?
+    private var learnDismissTimer: Timer?
+    
+    /// Show a brief notification when a dictionary correction is auto-learned.
+    /// Includes an Undo button to revert the addition.
+    func showAutoLearn(wrong: String, right: String, onUndo: @escaping () -> Void) {
+        DispatchQueue.main.async { [weak self] in
+            self?.presentLearnNotification(wrong: wrong, right: right, onUndo: onUndo)
+        }
+    }
+    
+    private func presentLearnNotification(wrong: String, right: String, onUndo: @escaping () -> Void) {
+        // Dismiss any existing learn notification
+        dismissLearnWindow()
+        
+        let text = "📝  \(wrong) → \(right)  已加入字典"
+        let font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        
+        // Calculate width from text
+        let textSize = (text as NSString).size(withAttributes: [.font: font])
+        let undoBtnWidth: CGFloat = 48
+        let padding: CGFloat = 32
+        let panelWidth = min(max(textSize.width + undoBtnWidth + padding + 16, 200), 420)
+        let panelHeight: CGFloat = 32
+        
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isFloatingPanel = true
+        panel.level = .statusBar
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = true
+        panel.ignoresMouseEvents = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        
+        // Dark pill background
+        let bg = NSView(frame: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight))
+        bg.wantsLayer = true
+        bg.layer?.cornerRadius = panelHeight / 2
+        bg.layer?.backgroundColor = NSColor(white: 0.12, alpha: 0.92).cgColor
+        bg.autoresizingMask = [.width, .height]
+        panel.contentView?.addSubview(bg)
+        
+        // Text label
+        let label = NSTextField(labelWithString: text)
+        label.font = font
+        label.textColor = NSColor(white: 0.92, alpha: 1.0)
+        label.frame = NSRect(x: 14, y: 6, width: panelWidth - undoBtnWidth - 24, height: 20)
+        label.lineBreakMode = .byTruncatingTail
+        bg.addSubview(label)
+        
+        // Undo button
+        let undoBtn = NSButton(frame: NSRect(x: panelWidth - undoBtnWidth - 8, y: 4, width: undoBtnWidth, height: 24))
+        undoBtn.title = "Undo"
+        undoBtn.bezelStyle = .inline
+        undoBtn.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        undoBtn.contentTintColor = NSColor(red: 0.55, green: 0.78, blue: 1.0, alpha: 1.0)
+        undoBtn.isBordered = false
+        undoBtn.target = self
+        undoBtn.action = #selector(learnUndoClicked)
+        bg.addSubview(undoBtn)
+        
+        // Store undo callback
+        self.learnUndoCallback = onUndo
+        
+        // Position: bottom center, above where the recording pill appears
+        let mouseLocation = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main ?? NSScreen.screens[0]
+        let sf = screen.visibleFrame
+        let x = sf.midX - panelWidth / 2
+        let y = sf.origin.y + 80
+        panel.setFrame(NSRect(x: x, y: y, width: panelWidth, height: panelHeight), display: true)
+        
+        // Fade in
+        panel.alphaValue = 0
+        panel.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.2
+            panel.animator().alphaValue = 1.0
+        }
+        
+        self.learnWindow = panel
+        
+        // Auto-dismiss after 4 seconds
+        learnDismissTimer?.invalidate()
+        learnDismissTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
+            self?.dismissLearnWindow()
+        }
+    }
+    
+    private var learnUndoCallback: (() -> Void)?
+    
+    @objc private func learnUndoClicked() {
+        Log.info("📝 User clicked Undo on auto-learn")
+        learnUndoCallback?()
+        learnUndoCallback = nil
+        dismissLearnWindow()
+    }
+    
+    private func dismissLearnWindow() {
+        learnDismissTimer?.invalidate()
+        learnDismissTimer = nil
+        learnUndoCallback = nil
+        guard let w = learnWindow else { return }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.25
+            w.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            w.orderOut(nil)
+            self?.learnWindow = nil
+        })
+    }
+    
     // MARK: - Result Window (clipboard fallback)
     
     private var resultWindow: NSPanel?

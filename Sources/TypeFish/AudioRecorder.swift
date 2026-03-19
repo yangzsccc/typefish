@@ -26,6 +26,33 @@ class AudioRecorder {
     /// Real-time audio level callback (called on audio thread)
     var onAudioLevel: ((Float) -> Void)?
     
+    /// Flag to suppress device change listener when WE cause the change
+    private var suppressDeviceChange = false
+    
+    /// Cached device ID for preferred microphone (avoids re-enumeration)
+    private var preferredDeviceID: AudioDeviceID = 0
+    
+
+    
+    /// Lock system default input to preferred microphone at app startup.
+    /// Lock system default input to preferred mic at startup.
+    func lockPreferredMicrophone() {
+        guard let pref = preferredMicrophone, !pref.isEmpty else { return }
+        
+        let deviceID = findInputDevice(matching: pref)
+        guard deviceID != 0 else {
+            Log.info("⚠️ Preferred mic '\(pref)' not found — cannot lock input device")
+            return
+        }
+        
+        preferredDeviceID = deviceID
+        setSystemDefaultInput(deviceID: deviceID)
+        Log.info("🔒 Locked system input to preferred mic (prevents BT switching)")
+    }
+    
+    deinit {
+    }
+    
     /// Start recording microphone to a temporary file
     func startRecording() -> Bool {
         guard !isRecording else { return false }
@@ -47,6 +74,26 @@ class AudioRecorder {
         }
         
         let inputNode = audioEngine.inputNode
+        
+        // Also bind the AudioUnit directly to our device (belt-and-suspenders)
+        // Even if macOS changes system default after engine.start(), this keeps the engine on Studio Display
+        if preferredDeviceID != 0, let audioUnit = inputNode.audioUnit {
+            var devID = preferredDeviceID
+            let auStatus = AudioUnitSetProperty(
+                audioUnit,
+                kAudioOutputUnitProperty_CurrentDevice,
+                kAudioUnitScope_Global,
+                0,
+                &devID,
+                UInt32(MemoryLayout<AudioDeviceID>.size)
+            )
+            if auStatus == noErr {
+                Log.info("🎤 AudioUnit input locked to preferred mic (id: \(preferredDeviceID))")
+            } else {
+                Log.info("⚠️ AudioUnit device set returned \(auStatus) — relying on system default")
+            }
+        }
+        
         let inputFormat = inputNode.outputFormat(forBus: 0)
         
         guard inputFormat.sampleRate > 0 else {
@@ -290,12 +337,8 @@ class AudioRecorder {
         }
     }
     
-    /// Select a specific microphone by partial match on ID or name
-    private func selectMicrophone(matching query: String) {
-        var deviceID: AudioDeviceID = 0
-        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        
-        // Get all audio devices
+    /// Find an input device by partial match on name or UID
+    private func findInputDevice(matching query: String) -> AudioDeviceID {
         var propAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -349,18 +392,16 @@ class AudioRecorder {
             
             let queryLower = query.lowercased()
             if deviceName.lowercased().contains(queryLower) || deviceUID.lowercased().contains(queryLower) {
-                deviceID = did
-                Log.info("🎤 Selected microphone: \(deviceName) [\(deviceUID)]")
-                break
+                Log.info("🎤 Found microphone: \(deviceName) [\(deviceUID)] (id: \(did))")
+                return did
             }
         }
-        
-        guard deviceID != 0 else {
-            Log.info("⚠️ Microphone matching '\(query)' not found, using system default")
-            return
-        }
-        
-        // Set as system default input (affects AVAudioEngine's inputNode)
+        return 0
+    }
+    
+    /// Set system default input device (suppresses our own listener)
+    private func setSystemDefaultInput(deviceID: AudioDeviceID) {
+        suppressDeviceChange = true
         var inputDeviceID = deviceID
         var defaultInputAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultInputDevice,
@@ -375,7 +416,42 @@ class AudioRecorder {
             &inputDeviceID
         )
         if status != noErr {
-            Log.info("⚠️ Failed to set input device (error: \(status))")
+            Log.info("⚠️ Failed to set system default input (error: \(status))")
+        }
+        // Delay re-enabling listener to let the notification pass
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.suppressDeviceChange = false
+        }
+    }
+    
+    /// Ensure preferred mic is the system default (called before each recording)
+    private func selectMicrophone(matching query: String) {
+        // Use cached device ID if available, otherwise find it
+        if preferredDeviceID == 0 {
+            preferredDeviceID = findInputDevice(matching: query)
+        }
+        
+        guard preferredDeviceID != 0 else {
+            Log.info("⚠️ Microphone matching '\(query)' not found, using system default")
+            return
+        }
+        
+        // Verify system default is still our preferred device
+        var currentDefault: AudioDeviceID = 0
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var defaultAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &defaultAddr, 0, nil, &size, &currentDefault)
+        
+        if currentDefault != preferredDeviceID {
+            Log.info("⚠️ System default changed — resetting to preferred mic")
+            setSystemDefaultInput(deviceID: preferredDeviceID)
+            Thread.sleep(forTimeInterval: 0.1)
+        } else {
+            Log.info("🎤 System default is correct (id: \(preferredDeviceID))")
         }
     }
     
@@ -389,10 +465,26 @@ class AudioRecorder {
         
         let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self = self else { return }
-            Log.info("🔄 Audio input device changed")
+            
+            // Ignore device changes we caused ourselves
+            guard !self.suppressDeviceChange else {
+                Log.info("🔄 Audio input device changed (suppressed — our own change)")
+                return
+            }
+            
+            Log.info("🔄 Audio input device changed by system/user")
+            
+            // If preferred mic is configured, force it back and DON'T cancel recording
+            // macOS may auto-switch system default to BT when audio capture starts — fight it
+            if self.preferredDeviceID != 0 {
+                Log.info("🔒 Re-locking system input to preferred mic")
+                self.setSystemDefaultInput(deviceID: self.preferredDeviceID)
+                // Don't cancel recording — our engine was already started with the right device
+                return
+            }
             
             if self.isRecording {
-                // If we're recording, stop gracefully — the recording is likely corrupted anyway
+                // No preferred mic — device change during recording means stop
                 Log.info("⚠️ Device changed during recording — stopping")
                 DispatchQueue.main.async {
                     _ = self.stopRecording()
