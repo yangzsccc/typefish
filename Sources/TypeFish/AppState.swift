@@ -6,7 +6,14 @@ import AppKit
 class AppState: ObservableObject {
     
     @Published var isRecording = false
-    @Published var isProcessing = false
+    @Published var isProcessing = false {
+        didSet {
+            if !isProcessing {
+                processingTimeout?.invalidate()
+                processingTimeout = nil
+            }
+        }
+    }
     @Published var statusText = "Ready"
     
     /// When true, current recording will be translated to English
@@ -24,6 +31,10 @@ class AppState: ObservableObject {
     
     /// File monitor for auto-reloading dictionary
     private var dictFileMonitor: DispatchSourceFileSystemObject?
+    
+    /// Safety timeout to prevent permanent processing stuck
+    private var processingTimeout: Timer?
+    private let maxProcessingTime: TimeInterval = 30
     
     /// Custom sounds
     private var startSound: NSSound?
@@ -112,9 +123,17 @@ class AppState: ObservableObject {
     // MARK: - Recording
     
     private func startRecording() {
-        guard !isProcessing else {
-            Log.info("⚠️ Still processing previous recording, please wait")
-            return
+        if isProcessing {
+            // If processing has been stuck for >10s, force-reset on hotkey press
+            // Timer fires at start+30s, so fireDate-now < 20 means >10s elapsed
+            if let timeout = processingTimeout, timeout.fireDate.timeIntervalSinceNow < 20 {
+                Log.info("⚠️ Force-resetting stuck processing state (user pressed hotkey)")
+                isProcessing = false
+                overlay.dismiss()
+            } else {
+                Log.info("⚠️ Still processing previous recording, please wait")
+                return
+            }
         }
         
         // Stop any edit tracking from previous recording
@@ -208,6 +227,23 @@ class AppState: ObservableObject {
         onStateChange?()
         
         overlay.showProcessing()
+        
+        // Safety: force-reset after 30s to prevent permanent stuck
+        processingTimeout?.invalidate()
+        processingTimeout = Timer.scheduledTimer(withTimeInterval: maxProcessingTime, repeats: false) { [weak self] _ in
+            guard let self = self, self.isProcessing else { return }
+            Log.info("⚠️ Processing timeout (\(Int(self.maxProcessingTime))s) — force resetting")
+            self.isProcessing = false
+            self.statusText = "⚠️ Timeout"
+            self.onStateChange?()
+            self.overlay.dismiss()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                if !self.isRecording && !self.isProcessing {
+                    self.statusText = "Ready"
+                    self.onStateChange?()
+                }
+            }
+        }
         
         guard let apiKey = groqAPIKey else {
             Log.info("❌ No API key, cannot transcribe")
