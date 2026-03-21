@@ -34,6 +34,32 @@ class AudioRecorder {
     
 
     
+    /// Pre-warm the audio HAL at app launch so first recording starts fast.
+    /// On MacBook Air, first engine start can take 5-10 seconds without this.
+    func preWarm() {
+        let start = CFAbsoluteTimeGetCurrent()
+        // Access inputNode to force audio graph initialization
+        let inputNode = audioEngine.inputNode
+        let format = inputNode.outputFormat(forBus: 0)
+        
+        guard format.sampleRate > 0 else {
+            Log.info("🔥 Pre-warm: no microphone available")
+            return
+        }
+        
+        // Brief start/stop to initialize the HAL pipeline
+        do {
+            try audioEngine.start()
+            Thread.sleep(forTimeInterval: 0.1)
+            audioEngine.stop()
+            let elapsed = CFAbsoluteTimeGetCurrent() - start
+            Log.info("🔥 Audio engine pre-warmed in \(String(format: "%.1f", elapsed))s (rate: \(Int(format.sampleRate))Hz)")
+        } catch {
+            let elapsed = CFAbsoluteTimeGetCurrent() - start
+            Log.info("🔥 Pre-warm failed (\(String(format: "%.1f", elapsed))s): \(error.localizedDescription)")
+        }
+    }
+    
     /// Lock system default input to preferred microphone at app startup.
     /// Lock system default input to preferred mic at startup.
     func lockPreferredMicrophone() {

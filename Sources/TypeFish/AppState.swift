@@ -69,6 +69,11 @@ class AppState: ObservableObject {
         }
         
         watchDictionaryFile()
+        
+        // Pre-warm audio engine in background (fixes slow first-start on MacBook Air)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.recorder.preWarm()
+        }
     }
     
     /// Toggle recording on/off (normal transcribe)
