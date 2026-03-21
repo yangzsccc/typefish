@@ -207,8 +207,8 @@ class AudioRecorder {
         audioFile = nil
         isRecording = false
         
-        // Recreate engine for clean state on next recording
-        audioEngine = AVAudioEngine()
+        // Don't recreate engine — reuse it for fast subsequent starts.
+        // audioEngine.reset() in startRecording() provides clean state.
         
         guard let url = outputURL else { return nil }
         
@@ -228,7 +228,7 @@ class AudioRecorder {
         do { audioEngine.inputNode.removeTap(onBus: 0) } catch {}
         audioFile = nil
         isRecording = false
-        audioEngine = AVAudioEngine()
+        // Don't recreate engine — keep it warm for fast restart
         Log.info("🧹 AudioRecorder force cleanup")
     }
     
@@ -534,8 +534,7 @@ class AudioRecorder {
             } else {
                 // Reset engine to pick up new device on next recording
                 self.audioEngine.reset()
-                self.audioEngine = AVAudioEngine()
-                Log.info("🔄 Audio engine recreated for new device")
+                Log.info("🔄 Audio engine reset for new device")
             }
         }
         
