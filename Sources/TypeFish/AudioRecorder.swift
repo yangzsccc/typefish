@@ -170,7 +170,11 @@ class AudioRecorder {
     
     /// Stop recording and return the file URL
     func stopRecording() -> URL? {
-        guard isRecording else { return nil }
+        guard isRecording else {
+            // Engine might be in a bad state from a slow async start — force cleanup
+            forceCleanup()
+            return nil
+        }
         
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
@@ -189,6 +193,17 @@ class AudioRecorder {
         }
         
         return url
+    }
+    
+    /// Force cleanup engine state regardless of isRecording flag.
+    /// Handles race condition where async engine.start() completes after user already stopped.
+    func forceCleanup() {
+        audioEngine.stop()
+        do { audioEngine.inputNode.removeTap(onBus: 0) } catch {}
+        audioFile = nil
+        isRecording = false
+        audioEngine = AVAudioEngine()
+        Log.info("🧹 AudioRecorder force cleanup")
     }
     
     /// Check if audio was basically silence (Whisper hallucination prevention)

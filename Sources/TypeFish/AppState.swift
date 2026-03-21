@@ -159,13 +159,27 @@ class AppState: ObservableObject {
         // during device transitions (e.g. headphone disconnect).
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
+            
+            // Check if user already cancelled/stopped while engine was starting
+            guard self.isRecording else {
+                Log.info("⚠️ User cancelled before engine started")
+                return
+            }
+            
             let success = self.recorder.startRecording()
-            if !success {
-                DispatchQueue.main.async {
+            
+            DispatchQueue.main.async {
+                if !success {
                     Log.info("❌ Failed to start recording")
                     self.isRecording = false
                     self.statusText = "Ready"
                     self.onStateChange?()
+                    self.overlay.dismiss()
+                } else if !self.isRecording {
+                    // User pressed stop/cancel while engine was starting up
+                    // Engine started successfully but we no longer need it
+                    Log.info("⚠️ Engine started after user stopped — cleaning up")
+                    self.recorder.forceCleanup()
                     self.overlay.dismiss()
                 }
             }
