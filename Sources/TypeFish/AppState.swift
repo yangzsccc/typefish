@@ -70,9 +70,9 @@ class AppState: ObservableObject {
         
         watchDictionaryFile()
         
-        // Pre-warm audio engine in background (fixes slow first-start on MacBook Air)
+        // Start audio engine in background — keeps running so recording is instant
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.recorder.preWarm()
+            self?.recorder.startEngine()
         }
     }
     
@@ -159,35 +159,15 @@ class AppState: ObservableObject {
             self?.overlay.updateAudioLevel(rms)
         }
         
-        // Start recording off main thread to avoid blocking the event tap.
-        // Audio HAL operations (device enumeration, engine start) can block
-        // during device transitions (e.g. headphone disconnect).
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-            
-            // Check if user already cancelled/stopped while engine was starting
-            guard self.isRecording else {
-                Log.info("⚠️ User cancelled before engine started")
-                return
-            }
-            
-            let success = self.recorder.startRecording()
-            
-            DispatchQueue.main.async {
-                if !success {
-                    Log.info("❌ Failed to start recording")
-                    self.isRecording = false
-                    self.statusText = "Ready"
-                    self.onStateChange?()
-                    self.overlay.dismiss()
-                } else if !self.isRecording {
-                    // User pressed stop/cancel while engine was starting up
-                    // Engine started successfully but we no longer need it
-                    Log.info("⚠️ Engine started after user stopped — cleaning up")
-                    self.recorder.forceCleanup()
-                    self.overlay.dismiss()
-                }
-            }
+        // Start recording — instant because engine is already running
+        // Just creates a file for the tap to write to
+        let success = recorder.startRecording()
+        if !success {
+            Log.info("❌ Failed to start recording")
+            isRecording = false
+            statusText = "Ready"
+            onStateChange?()
+            overlay.dismiss()
         }
     }
     

@@ -4,12 +4,19 @@ import ObjCExceptionCatcher
 /// Records microphone audio to a file using AVAudioEngine.
 /// Outputs 16kHz mono WAV (optimal for Whisper).
 /// Tracks peak audio level to detect silence.
+///
+/// Architecture: Engine + tap run continuously after startEngine().
+/// startRecording() just creates a file (instant). stopRecording() nils it.
+/// The tap callback writes only when audioFile != nil.
 class AudioRecorder {
     
     private var audioEngine = AVAudioEngine()
     private var audioFile: AVAudioFile?
     private var outputURL: URL?
     private(set) var isRecording = false
+    
+    /// Whether the engine is running with tap installed
+    private(set) var isEngineRunning = false
     
     /// Preferred microphone identifier (partial match on ID or name)
     var preferredMicrophone: String? = nil
@@ -32,66 +39,14 @@ class AudioRecorder {
     /// Cached device ID for preferred microphone (avoids re-enumeration)
     private var preferredDeviceID: AudioDeviceID = 0
     
-
-    
-    /// Pre-warm the audio HAL at app launch so first recording starts fast.
-    /// On MacBook Air, first engine start can take 5-10 seconds without this.
-    func preWarm() {
+    /// Start the audio engine with tap installed. Engine stays running
+    /// so that startRecording() is instant (just creates a file).
+    /// Call once at app launch (background thread OK).
+    func startEngine() {
+        guard !isEngineRunning else { return }
+        
         let start = CFAbsoluteTimeGetCurrent()
-        // Access inputNode to force audio graph initialization
-        let inputNode = audioEngine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
         
-        guard format.sampleRate > 0 else {
-            Log.info("🔥 Pre-warm: no microphone available")
-            return
-        }
-        
-        // Brief start/stop to initialize the HAL pipeline
-        do {
-            try audioEngine.start()
-            Thread.sleep(forTimeInterval: 0.1)
-            audioEngine.stop()
-            let elapsed = CFAbsoluteTimeGetCurrent() - start
-            Log.info("🔥 Audio engine pre-warmed in \(String(format: "%.1f", elapsed))s (rate: \(Int(format.sampleRate))Hz)")
-        } catch {
-            let elapsed = CFAbsoluteTimeGetCurrent() - start
-            Log.info("🔥 Pre-warm failed (\(String(format: "%.1f", elapsed))s): \(error.localizedDescription)")
-        }
-    }
-    
-    /// Lock system default input to preferred microphone at app startup.
-    /// Lock system default input to preferred mic at startup.
-    func lockPreferredMicrophone() {
-        guard let pref = preferredMicrophone, !pref.isEmpty else { return }
-        
-        let deviceID = findInputDevice(matching: pref)
-        guard deviceID != 0 else {
-            Log.info("⚠️ Preferred mic '\(pref)' not found — cannot lock input device")
-            return
-        }
-        
-        preferredDeviceID = deviceID
-        setSystemDefaultInput(deviceID: deviceID)
-        Log.info("🔒 Locked system input to preferred mic (prevents BT switching)")
-    }
-    
-    deinit {
-    }
-    
-    /// Start recording microphone to a temporary file
-    func startRecording() -> Bool {
-        guard !isRecording else { return false }
-        
-        peakRMSLevel = 0.0
-        
-        // Create temp file
-        let tempDir = FileManager.default.temporaryDirectory
-        let filename = "typefish_\(Int(Date().timeIntervalSince1970)).wav"
-        let url = tempDir.appendingPathComponent(filename)
-        self.outputURL = url
-        
-        // Reset engine to pick up any device changes (prevents crash on device switch)
         audioEngine.reset()
         
         // Select preferred microphone if configured
@@ -101,8 +56,7 @@ class AudioRecorder {
         
         let inputNode = audioEngine.inputNode
         
-        // Also bind the AudioUnit directly to our device (belt-and-suspenders)
-        // Even if macOS changes system default after engine.start(), this keeps the engine on Studio Display
+        // Bind AudioUnit directly to preferred device
         if preferredDeviceID != 0, let audioUnit = inputNode.audioUnit {
             var devID = preferredDeviceID
             let auStatus = AudioUnitSetProperty(
@@ -124,7 +78,7 @@ class AudioRecorder {
         
         guard inputFormat.sampleRate > 0 else {
             Log.info("❌ No microphone input available")
-            return false
+            return
         }
         
         // Target format: 16kHz mono (Whisper's native rate)
@@ -135,29 +89,16 @@ class AudioRecorder {
             interleaved: false
         ) else {
             Log.info("❌ Failed to create target audio format")
-            return false
+            return
         }
         
-        // Create audio file
-        do {
-            audioFile = try AVAudioFile(forWriting: url, settings: targetFormat.settings)
-        } catch {
-            Log.info("❌ Failed to create audio file: \(error.localizedDescription)")
-            return false
-        }
-        
-        // Install converter tap if sample rates differ
         guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
             Log.info("❌ Failed to create audio converter")
-            return false
+            return
         }
         
-        let needsConversion = inputFormat.sampleRate != 16000 || inputFormat.channelCount != 1
-        
-        // Install tap — use ObjC exception catcher since installTap throws NSException
-        // on device format mismatch (e.g. after headphone connect/disconnect)
+        // Install tap — writes to audioFile when non-nil, discards otherwise
         if !installTapSafely(on: inputNode, format: inputFormat, targetFormat: targetFormat, converter: converter) {
-            // Retry: full reset and re-read format
             Log.info("⚠️ Tap install failed, retrying with engine reset...")
             audioEngine.reset()
             
@@ -169,46 +110,118 @@ class AudioRecorder {
             let retryFormat = retryNode.outputFormat(forBus: 0)
             guard retryFormat.sampleRate > 0 else {
                 Log.info("❌ No microphone available after reset")
-                return false
+                return
             }
             guard let retryConverter = AVAudioConverter(from: retryFormat, to: targetFormat) else {
                 Log.info("❌ Failed to create converter on retry")
-                return false
+                return
             }
             
             if !installTapSafely(on: retryNode, format: retryFormat, targetFormat: targetFormat, converter: retryConverter) {
                 Log.info("❌ Tap install failed on retry too")
-                return false
+                return
             }
         }
         
         do {
             try audioEngine.start()
-            isRecording = true
-            Log.info("🎙️ Recording started → \(url.lastPathComponent)")
-            return true
+            isEngineRunning = true
+            let elapsed = CFAbsoluteTimeGetCurrent() - start
+            Log.info("🔥 Audio engine started in \(String(format: "%.1f", elapsed))s (rate: \(Int(inputFormat.sampleRate))Hz) — always-on mode")
         } catch {
             Log.info("❌ Audio engine failed to start: \(error.localizedDescription)")
             audioEngine.inputNode.removeTap(onBus: 0)
+        }
+    }
+    
+    /// Restart the engine (e.g. after device change)
+    func restartEngine() {
+        Log.info("🔄 Restarting audio engine...")
+        audioEngine.stop()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        isEngineRunning = false
+        audioEngine.reset()
+        startEngine()
+    }
+    
+    /// Lock system default input to preferred microphone at app startup.
+    func lockPreferredMicrophone() {
+        guard let pref = preferredMicrophone, !pref.isEmpty else { return }
+        
+        let deviceID = findInputDevice(matching: pref)
+        guard deviceID != 0 else {
+            Log.info("⚠️ Preferred mic '\(pref)' not found — cannot lock input device")
+            return
+        }
+        
+        preferredDeviceID = deviceID
+        setSystemDefaultInput(deviceID: deviceID)
+        Log.info("🔒 Locked system input to preferred mic (prevents BT switching)")
+    }
+    
+    deinit {
+    }
+    
+    /// Start recording microphone to a temporary file.
+    /// Engine must already be running (call startEngine first).
+    /// This is instant — just creates a file for the tap to write to.
+    func startRecording() -> Bool {
+        guard !isRecording else { return false }
+        
+        // Start engine if not running (fallback)
+        if !isEngineRunning {
+            Log.info("⚠️ Engine not running, starting now...")
+            startEngine()
+            guard isEngineRunning else {
+                Log.info("❌ Failed to start engine")
+                return false
+            }
+        }
+        
+        peakRMSLevel = 0.0
+        
+        // Create temp file
+        let tempDir = FileManager.default.temporaryDirectory
+        let filename = "typefish_\(Int(Date().timeIntervalSince1970)).wav"
+        let url = tempDir.appendingPathComponent(filename)
+        self.outputURL = url
+        
+        // Target format: 16kHz mono
+        guard let targetFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16000,
+            channels: 1,
+            interleaved: false
+        ) else {
+            Log.info("❌ Failed to create target audio format")
             return false
         }
+        
+        // Create audio file — tap will start writing immediately
+        do {
+            audioFile = try AVAudioFile(forWriting: url, settings: targetFormat.settings)
+        } catch {
+            Log.info("❌ Failed to create audio file: \(error.localizedDescription)")
+            return false
+        }
+        
+        isRecording = true
+        Log.info("🎙️ Recording started → \(url.lastPathComponent)")
+        return true
     }
     
     /// Stop recording and return the file URL
     func stopRecording() -> URL? {
         guard isRecording else {
-            // Engine might be in a bad state from a slow async start — force cleanup
             forceCleanup()
             return nil
         }
         
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
+        // Stop writing — tap keeps running but discards buffers
         audioFile = nil
         isRecording = false
         
-        // Don't recreate engine — reuse it for fast subsequent starts.
-        // audioEngine.reset() in startRecording() provides clean state.
+        // Engine keeps running for next recording
         
         guard let url = outputURL else { return nil }
         
@@ -221,19 +234,14 @@ class AudioRecorder {
         return url
     }
     
-    /// Force cleanup engine state regardless of isRecording flag.
-    /// Handles race condition where async engine.start() completes after user already stopped.
+    /// Force cleanup recording state (not engine).
     func forceCleanup() {
-        audioEngine.stop()
-        do { audioEngine.inputNode.removeTap(onBus: 0) } catch {}
         audioFile = nil
         isRecording = false
-        // Don't recreate engine — keep it warm for fast restart
         Log.info("🧹 AudioRecorder force cleanup")
     }
     
     /// Check if audio was basically silence (Whisper hallucination prevention)
-    /// Returns true if peak RMS was below threshold
     func wasSilent(threshold: Float = 0.01) -> Bool {
         let silent = peakRMSLevel < threshold
         if silent {
@@ -257,7 +265,10 @@ class AudioRecorder {
             
             if needsConversion {
                 node.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
-                    guard let self = self, let file = self.audioFile else { return }
+                    guard let self = self else { return }
+                    
+                    // Only write + track levels when recording
+                    guard let file = self.audioFile else { return }
                     self.updatePeakLevel(buffer: buffer)
                     
                     let ratio = inputFormat.sampleRate / 16000.0
@@ -275,7 +286,8 @@ class AudioRecorder {
                 }
             } else {
                 node.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
-                    guard let self = self, let file = self.audioFile else { return }
+                    guard let self = self else { return }
+                    guard let file = self.audioFile else { return }
                     self.updatePeakLevel(buffer: buffer)
                     try? file.write(from: buffer)
                 }
@@ -309,14 +321,12 @@ class AudioRecorder {
     }
     
     /// Trim trailing silence from a WAV file to prevent Whisper hallucination.
-    /// Scans from the end, finds last frame above threshold, keeps 500ms buffer after it.
     static func trimTrailingSilence(fileURL: URL, threshold: Float = 0.008) -> URL? {
         guard let file = try? AVAudioFile(forReading: fileURL) else { return nil }
         let format = file.processingFormat
         let totalFrames = AVAudioFrameCount(file.length)
         guard totalFrames > 0 else { return nil }
         
-        // Read entire file into buffer
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: totalFrames) else { return nil }
         do {
             try file.read(into: buffer)
@@ -328,7 +338,6 @@ class AudioRecorder {
         let data = channelData[0]
         let sampleRate = Int(format.sampleRate)
         
-        // Scan backwards in chunks of 50ms to find last speech
         let chunkSize = sampleRate / 20  // 50ms chunks
         var lastSpeechFrame = Int(totalFrames)
         
@@ -348,23 +357,19 @@ class AudioRecorder {
             i -= chunkSize
         }
         
-        // Add 500ms buffer after last speech
         let bufferFrames = sampleRate / 2
         let trimFrame = min(lastSpeechFrame + bufferFrames, Int(totalFrames))
         
-        // Only trim if we'd remove at least 1 second
         let removedFrames = Int(totalFrames) - trimFrame
-        guard removedFrames > sampleRate else { return nil }  // less than 1s silence, don't bother
+        guard removedFrames > sampleRate else { return nil }
         
         let removedMs = removedFrames * 1000 / sampleRate
         Log.info("✂️ Trimmed \(removedMs)ms trailing silence")
         
-        // Write trimmed audio to new file
         let trimmedURL = fileURL.deletingLastPathComponent()
             .appendingPathComponent("trimmed_\(fileURL.lastPathComponent)")
         
         guard let trimmedBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(trimFrame)) else { return nil }
-        // Copy frames
         memcpy(trimmedBuffer.floatChannelData![0], data, trimFrame * MemoryLayout<Float>.size)
         trimmedBuffer.frameLength = AVAudioFrameCount(trimFrame)
         
@@ -378,7 +383,8 @@ class AudioRecorder {
         }
     }
     
-    /// Find an input device by partial match on name or UID
+    // MARK: - Device Management
+    
     private func findInputDevice(matching query: String) -> AudioDeviceID {
         var propAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
@@ -393,7 +399,6 @@ class AudioRecorder {
         AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &propAddress, 0, nil, &dataSize, &deviceIDs)
         
         for did in deviceIDs {
-            // Check if device has input channels
             var inputScope = AudioObjectPropertyAddress(
                 mSelector: kAudioDevicePropertyStreamConfiguration,
                 mScope: kAudioDevicePropertyScopeInput,
@@ -409,7 +414,6 @@ class AudioRecorder {
             bufferList.deallocate()
             if inputChannels == 0 { continue }
             
-            // Get device name
             var nameProperty = AudioObjectPropertyAddress(
                 mSelector: kAudioDevicePropertyDeviceNameCFString,
                 mScope: kAudioObjectPropertyScopeGlobal,
@@ -420,7 +424,6 @@ class AudioRecorder {
             AudioObjectGetPropertyData(did, &nameProperty, 0, nil, &nameSize, &name)
             let deviceName = name as String
             
-            // Get device UID
             var uidProperty = AudioObjectPropertyAddress(
                 mSelector: kAudioDevicePropertyDeviceUID,
                 mScope: kAudioObjectPropertyScopeGlobal,
@@ -440,7 +443,6 @@ class AudioRecorder {
         return 0
     }
     
-    /// Set system default input device (suppresses our own listener)
     private func setSystemDefaultInput(deviceID: AudioDeviceID) {
         suppressDeviceChange = true
         var inputDeviceID = deviceID
@@ -459,15 +461,12 @@ class AudioRecorder {
         if status != noErr {
             Log.info("⚠️ Failed to set system default input (error: \(status))")
         }
-        // Delay re-enabling listener to let the notification pass
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.suppressDeviceChange = false
         }
     }
     
-    /// Ensure preferred mic is the system default (called before each recording)
     private func selectMicrophone(matching query: String) {
-        // Use cached device ID if available, otherwise find it
         if preferredDeviceID == 0 {
             preferredDeviceID = findInputDevice(matching: query)
         }
@@ -477,7 +476,6 @@ class AudioRecorder {
             return
         }
         
-        // Verify system default is still our preferred device
         var currentDefault: AudioDeviceID = 0
         var size = UInt32(MemoryLayout<AudioDeviceID>.size)
         var defaultAddr = AudioObjectPropertyAddress(
@@ -496,7 +494,6 @@ class AudioRecorder {
         }
     }
     
-    /// Start listening for audio device changes (connect/disconnect headphones etc.)
     func startDeviceChangeListener() {
         var propAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultInputDevice,
@@ -507,7 +504,6 @@ class AudioRecorder {
         let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self = self else { return }
             
-            // Ignore device changes we caused ourselves
             guard !self.suppressDeviceChange else {
                 Log.info("🔄 Audio input device changed (suppressed — our own change)")
                 return
@@ -515,26 +511,23 @@ class AudioRecorder {
             
             Log.info("🔄 Audio input device changed by system/user")
             
-            // If preferred mic is configured, force it back and DON'T cancel recording
-            // macOS may auto-switch system default to BT when audio capture starts — fight it
             if self.preferredDeviceID != 0 {
                 Log.info("🔒 Re-locking system input to preferred mic")
                 self.setSystemDefaultInput(deviceID: self.preferredDeviceID)
-                // Don't cancel recording — our engine was already started with the right device
                 return
             }
             
             if self.isRecording {
-                // No preferred mic — device change during recording means stop
                 Log.info("⚠️ Device changed during recording — stopping")
                 DispatchQueue.main.async {
                     _ = self.stopRecording()
                     self.onDeviceChange?()
                 }
             } else {
-                // Reset engine to pick up new device on next recording
-                self.audioEngine.reset()
-                Log.info("🔄 Audio engine reset for new device")
+                // Restart engine to pick up new device
+                DispatchQueue.global(qos: .userInitiated).async {
+                    self.restartEngine()
+                }
             }
         }
         
@@ -553,7 +546,6 @@ class AudioRecorder {
         }
     }
     
-    /// Request microphone permission
     static func requestPermission(completion: @escaping (Bool) -> Void) {
         AVCaptureDevice.requestAccess(for: .audio) { granted in
             if granted {
