@@ -553,22 +553,33 @@ class AudioRecorder {
             Log.info("🔄 Audio input device changed → new default: \(newDefault) (preferred: \(self.preferredDeviceID))")
             Log.info("🔄 State: isRecording=\(self.isRecording) isEngineRunning=\(self.isEngineRunning) engine.isRunning=\(self.audioEngine.isRunning)")
             
-            // Debounce: BT connection fires 2-3 rapid device change events.
-            // Cancel previous pending handler and schedule a new one.
+            // Strategy: if we have a preferred device and our engine's AudioUnit
+            // is already bound to it via kAudioOutputUnitProperty_CurrentDevice,
+            // we just need to re-lock the system default. No need to restart the
+            // engine or stop recording — our tap is on the right device regardless
+            // of what macOS sets as system default.
+            if self.preferredDeviceID != 0 {
+                Log.info("🔒 Re-locking system input to preferred mic (id: \(self.preferredDeviceID)) — engine stays running")
+                self.setSystemDefaultInput(deviceID: self.preferredDeviceID)
+                // Verify engine is still actually running
+                if !self.audioEngine.isRunning {
+                    Log.info("⚠️ Engine stopped unexpectedly during device change — restarting")
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        self.restartEngine()
+                        self.dumpState()
+                    }
+                }
+                return
+            }
+            
+            // No preferred device — need to restart engine on new device
             self.deviceChangeWorkItem?.cancel()
             
             let wasRecording = self.isRecording
             if wasRecording {
-                // Stop recording immediately (data is already corrupted by device change)
-                Log.info("⚠️ Device changed during recording — stopping immediately")
+                Log.info("⚠️ Device changed during recording (no preferred mic) — stopping")
                 self.audioFile = nil
                 self.isRecording = false
-            }
-            
-            // Re-lock preferred mic immediately (before debounce delay)
-            if self.preferredDeviceID != 0 {
-                Log.info("🔒 Re-locking system input to preferred mic (id: \(self.preferredDeviceID))")
-                self.setSystemDefaultInput(deviceID: self.preferredDeviceID)
             }
             
             let workItem = DispatchWorkItem { [weak self] in
@@ -584,7 +595,6 @@ class AudioRecorder {
                 }
             }
             self.deviceChangeWorkItem = workItem
-            // Delay 0.8s to let macOS settle + debounce multiple notifications
             DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.8, execute: workItem)
         }
         
