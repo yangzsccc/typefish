@@ -514,19 +514,28 @@ class AudioRecorder {
             if self.preferredDeviceID != 0 {
                 Log.info("🔒 Re-locking system input to preferred mic")
                 self.setSystemDefaultInput(deviceID: self.preferredDeviceID)
-                return
             }
             
-            if self.isRecording {
-                Log.info("⚠️ Device changed during recording — stopping")
+            // Always restart engine on device change — the audio graph
+            // may be corrupted regardless of whether we have a preferred mic.
+            // If recording, stop it first (the recording is likely broken anyway).
+            let wasRecording = self.isRecording
+            if wasRecording {
+                Log.info("⚠️ Device changed during recording — stopping to restart engine")
                 DispatchQueue.main.async {
                     _ = self.stopRecording()
-                    self.onDeviceChange?()
                 }
-            } else {
-                // Restart engine to pick up new device
-                DispatchQueue.global(qos: .userInitiated).async {
-                    self.restartEngine()
+            }
+            
+            DispatchQueue.global(qos: .userInitiated).async {
+                // Let macOS settle the device change
+                Thread.sleep(forTimeInterval: 0.5)
+                self.restartEngine()
+                if wasRecording {
+                    Log.info("🔄 Device change recovery: engine restarted (was recording)")
+                    DispatchQueue.main.async {
+                        self.onDeviceChange?()
+                    }
                 }
             }
         }
