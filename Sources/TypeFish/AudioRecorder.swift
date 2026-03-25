@@ -173,6 +173,42 @@ class AudioRecorder {
         startEngine()
     }
     
+    /// Restart engine but keep audioFile and isRecording intact.
+    /// The new tap will resume writing to the same file.
+    /// Used during device changes to recover without interrupting the user.
+    func restartEngineKeepRecording() {
+        let wasRecording = isRecording
+        let hadFile = audioFile != nil
+        
+        // DON'T nil audioFile or isRecording.
+        // Stop engine and remove old tap — this is safe even with audioFile set
+        // because the tap callback won't fire once engine is stopped.
+        Log.info("🔄 Hot-restarting engine (wasRecording=\(wasRecording), hasFile=\(hadFile))...")
+        audioEngine.stop()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        isEngineRunning = false
+        
+        // Create fresh engine (old one's audio graph is corrupted)
+        audioEngine = AVAudioEngine()
+        
+        // Re-setup: select mic, bind AudioUnit, install tap, start
+        // startEngine() has `guard !isEngineRunning` so it will proceed.
+        startEngine()
+        
+        if wasRecording {
+            if isEngineRunning {
+                Log.info("🔄 Recording resumed — new tap writing to same file")
+            } else {
+                Log.info("❌ Engine failed to restart — recording lost")
+                audioFile = nil
+                isRecording = false
+                DispatchQueue.main.async {
+                    self.onDeviceChange?()
+                }
+            }
+        }
+    }
+    
     /// Lock system default input to preferred microphone at app startup.
     func lockPreferredMicrophone() {
         guard let pref = preferredMicrophone, !pref.isEmpty else { return }
@@ -553,46 +589,29 @@ class AudioRecorder {
             Log.info("🔄 Audio input device changed → new default: \(newDefault) (preferred: \(self.preferredDeviceID))")
             Log.info("🔄 State: isRecording=\(self.isRecording) isEngineRunning=\(self.isEngineRunning) engine.isRunning=\(self.audioEngine.isRunning)")
             
-            // Strategy: if we have a preferred device and our engine's AudioUnit
-            // is already bound to it via kAudioOutputUnitProperty_CurrentDevice,
-            // we just need to re-lock the system default. No need to restart the
-            // engine or stop recording — our tap is on the right device regardless
-            // of what macOS sets as system default.
+            // Re-lock system default to preferred mic
             if self.preferredDeviceID != 0 {
-                Log.info("🔒 Re-locking system input to preferred mic (id: \(self.preferredDeviceID)) — engine stays running")
+                Log.info("🔒 Re-locking system input to preferred mic (id: \(self.preferredDeviceID))")
                 self.setSystemDefaultInput(deviceID: self.preferredDeviceID)
-                // Verify engine is still actually running
-                if !self.audioEngine.isRunning {
-                    Log.info("⚠️ Engine stopped unexpectedly during device change — restarting")
-                    DispatchQueue.global(qos: .userInitiated).async {
-                        self.restartEngine()
-                        self.dumpState()
-                    }
-                }
-                return
             }
             
-            // No preferred device — need to restart engine on new device
+            // Always restart engine. BT device changes corrupt the audio graph
+            // even when AudioUnit is bound to a specific device. The engine may
+            // report isRunning=true but the tap receives silence.
+            //
+            // Key: DON'T touch audioFile or isRecording. The recording stays
+            // "in progress" — the new tap will pick up the existing audioFile
+            // and continue writing to it. We lose a few hundred ms of audio
+            // during the restart, but that's better than total silence.
             self.deviceChangeWorkItem?.cancel()
-            
-            let wasRecording = self.isRecording
-            if wasRecording {
-                Log.info("⚠️ Device changed during recording (no preferred mic) — stopping")
-                self.audioFile = nil
-                self.isRecording = false
-            }
-            
             let workItem = DispatchWorkItem { [weak self] in
                 guard let self = self else { return }
-                Log.info("🔄 Debounced engine restart (wasRecording=\(wasRecording))")
-                self.restartEngine()
+                let wasRecording = self.isRecording
+                Log.info("🔄 Debounced engine restart (isRecording=\(wasRecording), audioFile=\(self.audioFile != nil))")
+                
+                // Restart engine — preserves audioFile so tap resumes writing
+                self.restartEngineKeepRecording()
                 self.dumpState()
-                if wasRecording {
-                    Log.info("🔄 Device change recovery complete")
-                    DispatchQueue.main.async {
-                        self.onDeviceChange?()
-                    }
-                }
             }
             self.deviceChangeWorkItem = workItem
             DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.8, execute: workItem)
