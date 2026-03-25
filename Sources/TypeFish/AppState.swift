@@ -39,7 +39,7 @@ class AppState: ObservableObject {
     /// Custom sounds
     private var startSound: NSSound?
     private var stopSound: NSSound?
-    private var cancelSound: NSSound?
+    var cancelSound: NSSound?
     
     /// Floating overlay indicator
     let overlay = OverlayPanel()

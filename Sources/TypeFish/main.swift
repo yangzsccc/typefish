@@ -9,7 +9,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var hotkeyManager: HotkeyManager!
     
     func applicationDidFinishLaunching(_ notification: Notification) {
-        Log.clear()
+        Log.rotate()
         Log.info("🐟 TypeFish starting...")
         
         // Menu bar only app (no dock icon)
@@ -42,11 +42,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager.start()
         
         // Listen for audio device changes (headphone connect/disconnect)
+        // AudioRecorder handles engine restart internally.
+        // This callback just syncs AppState UI when recording is interrupted.
         state.recorder.onDeviceChange = { [weak self] in
             guard let self = self else { return }
-            if self.state.isRecording {
-                self.state.cancelRecording()
-                Log.info("⚠️ Recording cancelled due to device change")
+            Log.info("⚠️ Device change callback: AppState.isRecording=\(self.state.isRecording) recorder.isRecording=\(self.state.recorder.isRecording)")
+            if self.state.isRecording && !self.state.recorder.isRecording {
+                // Recorder already stopped itself — just sync UI state
+                self.state.isRecording = false
+                self.state.isProcessing = false
+                self.state.statusText = "🔄 Mic switched"
+                self.state.onStateChange?()
+                self.state.overlay.dismiss()
+                self.state.cancelSound?.play()
+                Log.info("⚠️ Recording interrupted by device change — UI reset")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    if !self.state.isRecording && !self.state.isProcessing {
+                        self.state.statusText = "Ready"
+                        self.state.onStateChange?()
+                    }
+                }
             }
         }
         state.recorder.startDeviceChangeListener()

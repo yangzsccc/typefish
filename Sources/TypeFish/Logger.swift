@@ -1,16 +1,27 @@
 import Foundation
 
-/// Simple file logger → /tmp/typefish.log
+/// Simple file logger → /tmp/typefish.log (keeps previous session in .prev)
 enum Log {
     private static let logPath = "/tmp/typefish.log"
+    private static let prevLogPath = "/tmp/typefish.log.prev"
     private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss.SSS"
         return f
     }()
     
+    /// Rotate: move current log to .prev, start fresh
+    static func rotate() {
+        let fm = FileManager.default
+        try? fm.removeItem(atPath: prevLogPath)
+        if fm.fileExists(atPath: logPath) {
+            try? fm.moveItem(atPath: logPath, toPath: prevLogPath)
+        }
+    }
+    
+    @available(*, deprecated, renamed: "rotate")
     static func clear() {
-        try? "".write(toFile: logPath, atomically: true, encoding: .utf8)
+        rotate()
     }
     
     static func info(_ message: String) {

@@ -36,6 +36,9 @@ class AudioRecorder {
     /// Flag to suppress device change listener when WE cause the change
     private var suppressDeviceChange = false
     
+    /// Debounce device change notifications (BT fires multiple rapid events)
+    private var deviceChangeWorkItem: DispatchWorkItem?
+    
     /// Cached device ID for preferred microphone (avoids re-enumeration)
     private var preferredDeviceID: AudioDeviceID = 0
     
@@ -134,6 +137,32 @@ class AudioRecorder {
         }
     }
     
+    /// Dump current audio state for diagnostics
+    func dumpState() {
+        Log.info("📊 === Audio State Dump ===")
+        Log.info("📊 isEngineRunning: \(isEngineRunning)")
+        Log.info("📊 isRecording: \(isRecording)")
+        Log.info("📊 audioFile: \(audioFile != nil ? "open" : "nil")")
+        Log.info("📊 preferredDeviceID: \(preferredDeviceID)")
+        Log.info("📊 engine.isRunning: \(audioEngine.isRunning)")
+        
+        let inputNode = audioEngine.inputNode
+        let format = inputNode.outputFormat(forBus: 0)
+        Log.info("📊 inputNode format: rate=\(format.sampleRate) ch=\(format.channelCount)")
+        
+        // Check what the actual system default input is
+        var currentDefault: AudioDeviceID = 0
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var defaultAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &defaultAddr, 0, nil, &size, &currentDefault)
+        Log.info("📊 system default input: \(currentDefault) (preferred: \(preferredDeviceID))")
+        Log.info("📊 === End State Dump ===")
+    }
+    
     /// Restart the engine (e.g. after device change)
     func restartEngine() {
         Log.info("🔄 Restarting audio engine...")
@@ -166,7 +195,10 @@ class AudioRecorder {
     /// Engine must already be running (call startEngine first).
     /// This is instant — just creates a file for the tap to write to.
     func startRecording() -> Bool {
-        guard !isRecording else { return false }
+        guard !isRecording else {
+            Log.info("⚠️ startRecording called but already recording")
+            return false
+        }
         
         // Start engine if not running (fallback)
         if !isEngineRunning {
@@ -206,7 +238,7 @@ class AudioRecorder {
         }
         
         isRecording = true
-        Log.info("🎙️ Recording started → \(url.lastPathComponent)")
+        Log.info("🎙️ Recording started → \(url.lastPathComponent) (engine.isRunning=\(audioEngine.isRunning))")
         return true
     }
     
@@ -509,35 +541,51 @@ class AudioRecorder {
                 return
             }
             
-            Log.info("🔄 Audio input device changed by system/user")
+            // Log what the new default is
+            var newDefault: AudioDeviceID = 0
+            var sz = UInt32(MemoryLayout<AudioDeviceID>.size)
+            var dAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &dAddr, 0, nil, &sz, &newDefault)
+            Log.info("🔄 Audio input device changed → new default: \(newDefault) (preferred: \(self.preferredDeviceID))")
+            Log.info("🔄 State: isRecording=\(self.isRecording) isEngineRunning=\(self.isEngineRunning) engine.isRunning=\(self.audioEngine.isRunning)")
             
+            // Debounce: BT connection fires 2-3 rapid device change events.
+            // Cancel previous pending handler and schedule a new one.
+            self.deviceChangeWorkItem?.cancel()
+            
+            let wasRecording = self.isRecording
+            if wasRecording {
+                // Stop recording immediately (data is already corrupted by device change)
+                Log.info("⚠️ Device changed during recording — stopping immediately")
+                self.audioFile = nil
+                self.isRecording = false
+            }
+            
+            // Re-lock preferred mic immediately (before debounce delay)
             if self.preferredDeviceID != 0 {
-                Log.info("🔒 Re-locking system input to preferred mic")
+                Log.info("🔒 Re-locking system input to preferred mic (id: \(self.preferredDeviceID))")
                 self.setSystemDefaultInput(deviceID: self.preferredDeviceID)
             }
             
-            // Always restart engine on device change — the audio graph
-            // may be corrupted regardless of whether we have a preferred mic.
-            // If recording, stop it first (the recording is likely broken anyway).
-            let wasRecording = self.isRecording
-            if wasRecording {
-                Log.info("⚠️ Device changed during recording — stopping to restart engine")
-                DispatchQueue.main.async {
-                    _ = self.stopRecording()
-                }
-            }
-            
-            DispatchQueue.global(qos: .userInitiated).async {
-                // Let macOS settle the device change
-                Thread.sleep(forTimeInterval: 0.5)
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                Log.info("🔄 Debounced engine restart (wasRecording=\(wasRecording))")
                 self.restartEngine()
+                self.dumpState()
                 if wasRecording {
-                    Log.info("🔄 Device change recovery: engine restarted (was recording)")
+                    Log.info("🔄 Device change recovery complete")
                     DispatchQueue.main.async {
                         self.onDeviceChange?()
                     }
                 }
             }
+            self.deviceChangeWorkItem = workItem
+            // Delay 0.8s to let macOS settle + debounce multiple notifications
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.8, execute: workItem)
         }
         
         let status = AudioObjectAddPropertyListenerBlock(
