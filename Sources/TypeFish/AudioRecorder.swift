@@ -132,8 +132,31 @@ class AudioRecorder {
             let elapsed = CFAbsoluteTimeGetCurrent() - start
             Log.info("🔥 Audio engine started in \(String(format: "%.1f", elapsed))s (rate: \(Int(inputFormat.sampleRate))Hz) — always-on mode")
         } catch {
-            Log.info("❌ Audio engine failed to start: \(error.localizedDescription)")
+            Log.info("⚠️ Audio engine failed to start: \(error.localizedDescription) — retrying without device lock")
             audioEngine.inputNode.removeTap(onBus: 0)
+            
+            // Retry: create fresh engine without forcing AudioUnit to specific device.
+            // BT connection may have made our preferred device temporarily unavailable.
+            audioEngine = AVAudioEngine()
+            let retryNode = audioEngine.inputNode
+            let retryFormat = retryNode.outputFormat(forBus: 0)
+            Log.info("🔄 Retry engine: inputFormat rate=\(retryFormat.sampleRate) ch=\(retryFormat.channelCount)")
+            
+            if retryFormat.sampleRate > 0 {
+                if let retryConverter = AVAudioConverter(from: retryFormat, to: targetFormat) {
+                    if installTapSafely(on: retryNode, format: retryFormat, targetFormat: targetFormat, converter: retryConverter) {
+                        do {
+                            try audioEngine.start()
+                            isEngineRunning = true
+                            let elapsed = CFAbsoluteTimeGetCurrent() - start
+                            Log.info("🔥 Audio engine started in \(String(format: "%.1f", elapsed))s (rate: \(Int(retryFormat.sampleRate))Hz) — fallback mode (no device lock)")
+                        } catch {
+                            Log.info("❌ Audio engine failed on retry too: \(error.localizedDescription)")
+                            audioEngine.inputNode.removeTap(onBus: 0)
+                        }
+                    }
+                }
+            }
         }
     }
     
@@ -320,7 +343,9 @@ class AudioRecorder {
         return silent
     }
     
-    /// Safely install a tap, catching ObjC exceptions from AVAudioEngine format mismatches
+    /// Safely install a tap, catching ObjC exceptions from AVAudioEngine format mismatches.
+    /// Passes nil as format to let the system choose — avoids "Input HW format and tap format
+    /// not matching" when BT headphones change the audio graph.
     private func installTapSafely(
         on node: AVAudioInputNode,
         format inputFormat: AVAudioFormat,
@@ -328,43 +353,68 @@ class AudioRecorder {
         converter: AVAudioConverter
     ) -> Bool {
         var objcError: NSError?
+        // Try nil format first (most robust), fall back to explicit format
         let success = ObjCTry({
-            let needsConversion = inputFormat.sampleRate != 16000 || inputFormat.channelCount != 1
-            
-            if needsConversion {
-                node.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
-                    guard let self = self else { return }
-                    
-                    // Only write + track levels when recording
-                    guard let file = self.audioFile else { return }
-                    self.updatePeakLevel(buffer: buffer)
-                    
-                    let ratio = inputFormat.sampleRate / 16000.0
+            node.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, _ in
+                guard let self = self else { return }
+                guard let file = self.audioFile else { return }
+                self.updatePeakLevel(buffer: buffer)
+                
+                let bufferFormat = buffer.format
+                if bufferFormat.sampleRate == 16000 && bufferFormat.channelCount == 1 {
+                    // Already in target format — write directly
+                    try? file.write(from: buffer)
+                } else {
+                    // Convert to 16kHz mono
+                    let ratio = bufferFormat.sampleRate / 16000.0
                     let outputFrames = AVAudioFrameCount(Double(buffer.frameLength) / ratio)
-                    guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outputFrames) else { return }
+                    guard outputFrames > 0 else { return }
+                    guard let outBuf = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outputFrames) else { return }
                     
+                    // Create converter on-demand if format changed
+                    guard let conv = AVAudioConverter(from: bufferFormat, to: targetFormat) else { return }
                     var error: NSError?
-                    converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
+                    conv.convert(to: outBuf, error: &error) { _, outStatus in
                         outStatus.pointee = .haveData
                         return buffer
                     }
-                    if error == nil && convertedBuffer.frameLength > 0 {
-                        try? file.write(from: convertedBuffer)
+                    if error == nil && outBuf.frameLength > 0 {
+                        try? file.write(from: outBuf)
                     }
-                }
-            } else {
-                node.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
-                    guard let self = self else { return }
-                    guard let file = self.audioFile else { return }
-                    self.updatePeakLevel(buffer: buffer)
-                    try? file.write(from: buffer)
                 }
             }
         }, &objcError)
         
         if !success {
-            Log.info("❌ installTap threw exception: \(objcError?.localizedDescription ?? "unknown")")
-            node.removeTap(onBus: 0)
+            Log.info("⚠️ installTap(nil format) failed: \(objcError?.localizedDescription ?? "unknown"), trying explicit format...")
+            // Fallback: try with explicit inputFormat
+            var fallbackError: NSError?
+            let fallbackSuccess = ObjCTry({
+                node.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
+                    guard let self = self else { return }
+                    guard let file = self.audioFile else { return }
+                    self.updatePeakLevel(buffer: buffer)
+                    
+                    let ratio = inputFormat.sampleRate / 16000.0
+                    let outputFrames = AVAudioFrameCount(Double(buffer.frameLength) / ratio)
+                    guard let outBuf = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outputFrames) else { return }
+                    
+                    var error: NSError?
+                    converter.convert(to: outBuf, error: &error) { _, outStatus in
+                        outStatus.pointee = .haveData
+                        return buffer
+                    }
+                    if error == nil && outBuf.frameLength > 0 {
+                        try? file.write(from: outBuf)
+                    }
+                }
+            }, &fallbackError)
+            
+            if !fallbackSuccess {
+                Log.info("❌ installTap threw exception: \(fallbackError?.localizedDescription ?? "unknown")")
+                node.removeTap(onBus: 0)
+            }
+            return fallbackSuccess
         }
         return success
     }
