@@ -54,7 +54,7 @@ class EditTracker {
         guard !isAnalyzing else { return }
         
         // Check clipboard fallback: if AX failed last time, check clipboard for edits
-        checkClipboardFallback()
+        checkClipboardFallback(apiKey: apiKey, appState: appState)
         
         stopTracking()
         
@@ -94,7 +94,7 @@ class EditTracker {
     }
     
     /// Check clipboard for edits (fallback for Electron apps where AX fails)
-    private func checkClipboardFallback() {
+    private func checkClipboardFallback(apiKey: String, appState: AppState) {
         guard let lastPasted = EditTracker.lastPastedText,
               let lastTime = EditTracker.lastPasteTime,
               Date().timeIntervalSince(lastTime) < 60 else {  // Only check within 60s
@@ -111,10 +111,7 @@ class EditTracker {
         let diff = computeDiff(original: lastPasted, edited: clipboardContent)
         if !diff.isEmpty && !isLargeModification(original: lastPasted, edited: clipboardContent) {
             Log.info("📝 EditTracker: clipboard fallback detected \(diff.count) correction(s)")
-            // This was from a previous paste where AX failed — analyze now
-            let savedKey = apiKey ?? ""
-            let savedAppState = appState
-            analyzeEdit(pastedText: lastPasted, editedFieldContent: clipboardContent, apiKey: savedKey, appState: savedAppState)
+            analyzeEdit(pastedText: lastPasted, editedFieldContent: clipboardContent, apiKey: apiKey, appState: appState)
         }
     }
     
