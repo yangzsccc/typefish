@@ -11,6 +11,57 @@ enum ContextReader {
     /// Maximum characters of context to capture (before cursor)
     private static let maxContextChars = 500
     
+    /// Read input state with cursor position awareness.
+    /// Returns text before cursor, text after cursor, and full content.
+    /// This allows EditTracker to know exactly where edits happened.
+    static func readInputState() -> (beforeCursor: String, afterCursor: String, fullContent: String)? {
+        guard let app = PasteService.savedApp else { return nil }
+        
+        let pid = app.processIdentifier
+        let axApp = AXUIElementCreateApplication(pid)
+        
+        var focusedElement: AnyObject?
+        let focusResult = AXUIElementCopyAttributeValue(axApp, kAXFocusedUIElementAttribute as CFString, &focusedElement)
+        guard focusResult == .success, let element = focusedElement else { return nil }
+        
+        let axElement = element as! AXUIElement
+        
+        var roleValue: AnyObject?
+        AXUIElementCopyAttributeValue(axElement, kAXRoleAttribute as CFString, &roleValue)
+        let role = roleValue as? String ?? ""
+        
+        let textRoles = ["AXTextArea", "AXTextField", "AXComboBox", "AXSearchField", "AXWebArea"]
+        guard textRoles.contains(role) else { return nil }
+        
+        // Get full text value
+        var valueObj: AnyObject?
+        let valueResult = AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &valueObj)
+        guard valueResult == .success, let fullText = valueObj as? String, !fullText.isEmpty else { return nil }
+        
+        // Try to get cursor position
+        var rangeObj: AnyObject?
+        let rangeResult = AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &rangeObj)
+        
+        if rangeResult == .success, let rangeValue = rangeObj {
+            var range = CFRange(location: 0, length: 0)
+            if AXValueGetValue(rangeValue as! AXValue, .cfRange, &range) {
+                let cursorPos = range.location
+                
+                // Validate cursor position
+                if cursorPos >= 0 && cursorPos <= fullText.count {
+                    let cursorIndex = fullText.index(fullText.startIndex, offsetBy: cursorPos)
+                    let before = String(fullText[..<cursorIndex])
+                    let after = String(fullText[cursorIndex...])
+                    
+                    return (beforeCursor: before, afterCursor: after, fullContent: fullText)
+                }
+            }
+        }
+        
+        // Fallback: cursor reading failed, return full text with empty splits
+        return (beforeCursor: fullText, afterCursor: "", fullContent: fullText)
+    }
+    
     /// Read the FULL text content of the currently focused text field.
     /// Used by EditTracker to monitor post-paste edits.
     /// Unlike readContext(), this returns the entire field value without truncation.

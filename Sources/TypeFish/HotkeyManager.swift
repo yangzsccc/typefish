@@ -18,6 +18,15 @@ class HotkeyManager {
     /// Called when Escape is pressed (cancel recording)
     var onCancel: (() -> Void)?
     
+    /// Called on any keypress when EditTracker is active
+    var onAnyKeyPress: (() -> Void)?
+    
+    /// Called when Enter key is pressed (for immediate analysis)
+    var onEnterKey: (() -> Void)?
+    
+    /// Flag to enable/disable keypress tracking for EditTracker
+    var isTrackingEdits: Bool = false
+    
     // Singleton needed because CGEvent tap callback is a C function pointer
     static var shared: HotkeyManager?
     
@@ -99,6 +108,20 @@ class HotkeyManager {
             }
             // Don't swallow Escape — let it propagate to other apps too
             return Unmanaged.passRetained(event)
+        }
+        
+        // Enter key (keyCode 36) — immediate analysis when tracking edits
+        if keyCode == 36 && HotkeyManager.shared?.isTrackingEdits == true {
+            DispatchQueue.main.async {
+                HotkeyManager.shared?.onEnterKey?()
+            }
+        }
+        
+        // If EditTracker is active, fire onAnyKeyPress callback for any keypress
+        if HotkeyManager.shared?.isTrackingEdits == true {
+            DispatchQueue.main.async {
+                HotkeyManager.shared?.onAnyKeyPress?()
+            }
         }
         
         return Unmanaged.passRetained(event)

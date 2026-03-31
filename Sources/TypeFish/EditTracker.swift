@@ -18,9 +18,8 @@ class EditTracker {
     static let shared = EditTracker()
     
     private let trackingDuration: TimeInterval = 15
-    private let pollInterval: TimeInterval = 2
+    private let debounceDelay: TimeInterval = 0.3  // 300ms after keypress before reading
     
-    private var timer: Timer?
     private var trackedText: String?
     private var trackingStartTime: Date?
     private var apiKey: String?
@@ -34,6 +33,16 @@ class EditTracker {
     /// Prevent tracking during certain states
     private var isAnalyzing = false
     
+    /// Debounce work item for keypress handling
+    private var debounceWorkItem: DispatchWorkItem?
+    
+    /// Timeout work item for 15s tracking window
+    private var timeoutWorkItem: DispatchWorkItem?
+    
+    /// Clipboard fallback for Electron apps
+    private static var lastPastedText: String?
+    private static var lastPasteTime: Date?
+    
     private init() {}
     
     // MARK: - Public API
@@ -43,104 +52,158 @@ class EditTracker {
     func startTracking(pastedText: String, apiKey: String, appState: AppState) {
         // Don't start if already tracking or analyzing
         guard !isAnalyzing else { return }
+        
+        // Check clipboard fallback: if AX failed last time, check clipboard for edits
+        checkClipboardFallback()
+        
         stopTracking()
         
         // Skip very short text (not worth tracking)
         guard pastedText.count >= 4 else { return }
         
-        // Delay to let paste settle, then try to verify with retries
+        // Save tracking state
         self.trackedText = pastedText
         self.apiKey = apiKey
         self.appState = appState
-        self.verifyAndStartPolling(pastedText: pastedText, attempt: 1)
+        self.trackingStartTime = Date()
+        
+        // Save for clipboard fallback
+        EditTracker.lastPastedText = pastedText
+        EditTracker.lastPasteTime = Date()
+        
+        // Enable keyboard event tracking
+        HotkeyManager.shared?.isTrackingEdits = true
+        
+        // Wire up keyboard callbacks
+        HotkeyManager.shared?.onAnyKeyPress = { [weak self] in
+            self?.handleKeyPress()
+        }
+        
+        HotkeyManager.shared?.onEnterKey = { [weak self] in
+            self?.handleEnterKey()
+        }
+        
+        // Set up 15s timeout
+        let timeoutItem = DispatchWorkItem { [weak self] in
+            self?.handleTimeout()
+        }
+        self.timeoutWorkItem = timeoutItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + trackingDuration, execute: timeoutItem)
+        
+        Log.info("📝 EditTracker: started keyboard-driven tracking for \(pastedText.count) chars")
+    }
+    
+    /// Check clipboard for edits (fallback for Electron apps where AX fails)
+    private func checkClipboardFallback() {
+        guard let lastPasted = EditTracker.lastPastedText,
+              let lastTime = EditTracker.lastPasteTime,
+              Date().timeIntervalSince(lastTime) < 60 else {  // Only check within 60s
+            return
+        }
+        
+        guard let clipboardContent = NSPasteboard.general.string(forType: .string),
+              !clipboardContent.isEmpty,
+              clipboardContent != lastPasted else {
+            return
+        }
+        
+        // Check if clipboard differs by small edit
+        let diff = computeDiff(original: lastPasted, edited: clipboardContent)
+        if !diff.isEmpty && !isLargeModification(original: lastPasted, edited: clipboardContent) {
+            Log.info("📝 EditTracker: clipboard fallback detected \(diff.count) correction(s)")
+            // This was from a previous paste where AX failed — analyze now
+            let savedKey = apiKey ?? ""
+            let savedAppState = appState
+            analyzeEdit(pastedText: lastPasted, editedFieldContent: clipboardContent, apiKey: savedKey, appState: savedAppState)
+        }
     }
     
     /// Stop tracking (called on timeout, new recording, or edit detected)
     func stopTracking() {
-        timer?.invalidate()
-        timer = nil
+        // Cancel pending work items
+        debounceWorkItem?.cancel()
+        debounceWorkItem = nil
+        timeoutWorkItem?.cancel()
+        timeoutWorkItem = nil
+        
+        // Clear state
         trackedText = nil
         trackingStartTime = nil
         apiKey = nil
         appState = nil
         lastChangeTime = nil
         lastFieldContent = nil
+        
+        // Disable keyboard tracking
+        HotkeyManager.shared?.isTrackingEdits = false
+        HotkeyManager.shared?.onAnyKeyPress = nil
+        HotkeyManager.shared?.onEnterKey = nil
     }
     
-    // MARK: - Startup Verification
+    // MARK: - Keyboard Event Handlers
     
-    private let maxVerifyAttempts = 3
-    private let verifyInterval: TimeInterval = 0.8  // seconds between retries
+    /// Called on every keypress while tracking is active
+    private func handleKeyPress() {
+        // Cancel any pending debounce
+        debounceWorkItem?.cancel()
+        
+        // Reset the 15s timeout (each keypress extends the window)
+        timeoutWorkItem?.cancel()
+        let timeoutItem = DispatchWorkItem { [weak self] in
+            self?.handleTimeout()
+        }
+        self.timeoutWorkItem = timeoutItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + trackingDuration, execute: timeoutItem)
+        
+        // Schedule debounced text reading
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.readAndCheckForEdits()
+        }
+        debounceWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + debounceDelay, execute: workItem)
+        
+        Log.info("📝 EditTracker: keypress detected, waiting \(Int(debounceDelay * 1000))ms...")
+    }
     
-    private func verifyAndStartPolling(pastedText: String, attempt: Int) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + verifyInterval) { [weak self] in
-            guard let self = self, self.trackedText != nil else { return }
-            
-            let fieldContent = ContextReader.readFullContent()
-            
-            if let content = fieldContent, content.contains(pastedText) {
-                // Found our text — start normal tracking
-                self.trackingStartTime = Date()
-                Log.info("📝 EditTracker: verified text in field (attempt \(attempt)), monitoring \(pastedText.count) chars")
-                self.startPollingTimer()
-                return
-            }
-            
-            if attempt < self.maxVerifyAttempts {
-                // Retry — app might not have rendered the paste yet
-                Log.info("📝 EditTracker: text not found yet (attempt \(attempt)/\(self.maxVerifyAttempts)), retrying...")
-                self.verifyAndStartPolling(pastedText: pastedText, attempt: attempt + 1)
-                return
-            }
-            
-            // All retries exhausted — check if we can read the field at all
-            if fieldContent != nil {
-                // We CAN read the field, but our text isn't there
-                // (common with Electron apps like Discord, Slack, VS Code)
-                // Start tracking anyway — compare against pasted text directly
-                self.trackingStartTime = Date()
-                Log.info("📝 EditTracker: text not verified but field readable, monitoring in relaxed mode")
-                self.startPollingTimer()
-            } else {
-                // Can't read the field at all — give up
-                Log.info("📝 EditTracker: cannot read field after \(self.maxVerifyAttempts) attempts, skipping")
-                self.stopTracking()
-            }
+    /// Called when Enter key is pressed — trigger immediate analysis
+    private func handleEnterKey() {
+        Log.info("📝 EditTracker: Enter key pressed, triggering immediate analysis")
+        debounceWorkItem?.cancel()
+        readAndCheckForEdits(immediate: true)
+    }
+    
+    /// Called when 15s timeout expires
+    private func handleTimeout() {
+        guard let tracked = trackedText else { return }
+        
+        // If there's a pending stable edit, analyze it
+        if let lastContent = lastFieldContent, lastChangeTime != nil {
+            Log.info("📝 EditTracker: timeout with pending edit, analyzing")
+            triggerAnalysis(pastedText: tracked, editedField: lastContent)
+        } else {
+            Log.info("📝 EditTracker: timeout, no edit detected")
+            stopTracking()
         }
     }
     
-    private func startPollingTimer() {
-        self.timer = Timer.scheduledTimer(withTimeInterval: self.pollInterval, repeats: true) { [weak self] _ in
-            self?.pollForEdits()
-        }
-    }
-    
-    // MARK: - Polling
-    
-    private func pollForEdits() {
+    /// Read current text and check for edits
+    private func readAndCheckForEdits(immediate: Bool = false) {
         guard let tracked = trackedText else {
             stopTracking()
             return
         }
         
-        // Check total timeout
-        guard let startTime = trackingStartTime,
-              Date().timeIntervalSince(startTime) < trackingDuration else {
-            // Timeout — if there's a pending stable edit, analyze it
-            if let lastContent = lastFieldContent, lastChangeTime != nil {
-                Log.info("📝 EditTracker: timeout with pending edit, analyzing")
-                triggerAnalysis(pastedText: tracked, editedField: lastContent)
-            } else {
-                Log.info("📝 EditTracker: timeout, no edit detected")
-                stopTracking()
-            }
-            return
-        }
-        
-        // Read current field content
-        guard let currentContent = ContextReader.readFullContent() else {
-            Log.info("📝 EditTracker: lost focus, stopping")
-            stopTracking()
+        // Try cursor-aware reading first
+        var currentContent: String
+        if let inputState = ContextReader.readInputState() {
+            Log.info("📝 EditTracker: read input state: before=\(inputState.beforeCursor.count) chars, after=\(inputState.afterCursor.count) chars")
+            currentContent = inputState.fullContent
+        } else if let fullContent = ContextReader.readFullContent() {
+            // Fallback to full content reading
+            Log.info("📝 EditTracker: cursor reading failed, using full content")
+            currentContent = fullContent
+        } else {
+            Log.info("📝 EditTracker: cannot read field content")
             return
         }
         
@@ -151,43 +214,47 @@ class EditTracker {
             return
         }
         
-        // Content drastically different — but only for longer texts
-        // Short texts (< 20 chars) can legitimately change a lot with one word edit
-        if tracked.count > 20 && currentContent.count < tracked.count / 5 {
-            Log.info("📝 EditTracker: large change (\(currentContent.count) vs \(tracked.count)), not a correction")
+        // Check for large modifications using character-level diff
+        if isLargeModification(original: tracked, edited: currentContent) {
+            Log.info("📝 EditTracker: large modification detected (orig=\(tracked.count) edit=\(currentContent.count)), stopping")
             stopTracking()
             return
         }
         
-        // If pasted text still present verbatim, no edit yet — reset debounce
+        // If pasted text still present verbatim, no edit yet
         if currentContent.contains(tracked) {
             lastChangeTime = nil
             lastFieldContent = nil
             return
         }
         
-        // Text has changed! But don't analyze immediately — debounce.
+        // Text has changed!
         let now = Date()
         
-        // If content changed since last poll, reset the stability timer
+        // If immediate analysis (Enter key), skip stability check
+        if immediate {
+            Log.info("📝 EditTracker: immediate analysis triggered")
+            triggerAnalysis(pastedText: tracked, editedField: currentContent)
+            return
+        }
+        
+        // If content changed since last check, reset stability timer
         if lastFieldContent != currentContent {
             if lastFieldContent == nil {
-                Log.info("📝 EditTracker: edit started, waiting for user to finish...")
+                Log.info("📝 EditTracker: edit started, waiting for stability...")
             }
             lastChangeTime = now
             lastFieldContent = currentContent
-            return  // Keep polling, user is still editing
+            return
         }
         
-        // Content same as last poll — check if stable long enough
+        // Content same as last check — verify stability
         guard let changeTime = lastChangeTime else { return }
         
         if now.timeIntervalSince(changeTime) >= stabilizeDelay {
-            // Text has been stable for 3+ seconds — user is done editing
             Log.info("📝 EditTracker: edit stabilized after \(String(format: "%.1f", now.timeIntervalSince(changeTime)))s")
             triggerAnalysis(pastedText: tracked, editedField: currentContent)
         }
-        // Otherwise: still waiting for stability
     }
     
     private func triggerAnalysis(pastedText: String, editedField: String) {
@@ -202,6 +269,54 @@ class EditTracker {
             apiKey: savedKey,
             appState: savedAppState
         )
+    }
+    
+    // MARK: - Character-Level Diff
+    
+    /// Compute character-level differences between original and edited text.
+    /// Returns array of (removed, inserted) string pairs.
+    private func computeDiff(original: String, edited: String) -> [(removed: String, inserted: String)] {
+        let diff = edited.difference(from: original)
+        
+        var removals: [String] = []
+        var insertions: [String] = []
+        
+        for change in diff {
+            switch change {
+            case .remove(_, let element, _):
+                removals.append(String(element))
+            case .insert(_, let element, _):
+                insertions.append(String(element))
+            }
+        }
+        
+        // Merge consecutive characters into words/phrases
+        let removedText = removals.joined()
+        let insertedText = insertions.joined()
+        
+        if !removedText.isEmpty || !insertedText.isEmpty {
+            return [(removed: removedText, inserted: insertedText)]
+        }
+        
+        return []
+    }
+    
+    /// Check if modification is too large (>50% removed OR changed >2x)
+    private func isLargeModification(original: String, edited: String) -> Bool {
+        let origCount = original.count
+        let editCount = edited.count
+        
+        // More than 50% content removed
+        if editCount < origCount / 2 {
+            return true
+        }
+        
+        // Changed more than 2x
+        if editCount > origCount * 2 || origCount > editCount * 2 {
+            return true
+        }
+        
+        return false
     }
     
     // MARK: - LLM Analysis
@@ -253,13 +368,42 @@ class EditTracker {
         // Cap field content to avoid huge payloads
         let cappedField = String(editedFieldContent.prefix(2000))
         
-        let userMessage = """
-        TEXT A (original STT output):
-        \(pastedText)
+        // Compute diff for more precise prompt
+        let diffs = computeDiff(original: pastedText, edited: cappedField)
         
-        TEXT B (after user's manual correction):
-        \(cappedField)
-        """
+        let userMessage: String
+        if diffs.count == 1, let diff = diffs.first {
+            // Small, focused diff — send specific change
+            let removed = diff.removed.trimmingCharacters(in: .whitespacesAndNewlines)
+            let inserted = diff.inserted.trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            if !removed.isEmpty && !inserted.isEmpty && removed.count < 50 && inserted.count < 50 {
+                userMessage = """
+                Changed: \(removed) → \(inserted)
+                
+                (Original full text: \(pastedText))
+                """
+                Log.info("📝 EditTracker: using focused diff prompt: [\(removed)] → [\(inserted)]")
+            } else {
+                // Fallback to full comparison
+                userMessage = """
+                TEXT A (original STT output):
+                \(pastedText)
+                
+                TEXT B (after user's manual correction):
+                \(cappedField)
+                """
+            }
+        } else {
+            // Multiple changes or complex diff — use full comparison
+            userMessage = """
+            TEXT A (original STT output):
+            \(pastedText)
+            
+            TEXT B (after user's manual correction):
+            \(cappedField)
+            """
+        }
         
         let payload: [String: Any] = [
             "model": "llama-3.1-8b-instant",
