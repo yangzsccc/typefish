@@ -23,7 +23,7 @@ class MainWindow {
         }
         
         let w = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 280),
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 300),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -40,18 +40,18 @@ class MainWindow {
         // Fish emoji + title
         let titleLabel = NSTextField(labelWithString: "🐟 TypeFish")
         titleLabel.font = NSFont.systemFont(ofSize: 24, weight: .bold)
-        titleLabel.frame = NSRect(x: 24, y: 228, width: 280, height: 32)
+        titleLabel.frame = NSRect(x: 24, y: 248, width: 280, height: 32)
         content.addSubview(titleLabel)
         
         // Version
         let versionLabel = NSTextField(labelWithString: "v\(Updater.currentVersion)")
         versionLabel.font = NSFont.systemFont(ofSize: 12)
         versionLabel.textColor = .secondaryLabelColor
-        versionLabel.frame = NSRect(x: 24, y: 210, width: 280, height: 18)
+        versionLabel.frame = NSRect(x: 24, y: 230, width: 280, height: 18)
         content.addSubview(versionLabel)
         
         // Divider
-        let divider1 = NSBox(frame: NSRect(x: 24, y: 200, width: 272, height: 1))
+        let divider1 = NSBox(frame: NSRect(x: 24, y: 220, width: 272, height: 1))
         divider1.boxType = .separator
         content.addSubview(divider1)
         
@@ -59,18 +59,18 @@ class MainWindow {
         let statusTitle = NSTextField(labelWithString: "Status")
         statusTitle.font = NSFont.systemFont(ofSize: 11, weight: .medium)
         statusTitle.textColor = .secondaryLabelColor
-        statusTitle.frame = NSRect(x: 24, y: 176, width: 280, height: 16)
+        statusTitle.frame = NSRect(x: 24, y: 196, width: 280, height: 16)
         content.addSubview(statusTitle)
         
         let sl = NSTextField(labelWithString: "● Ready")
         sl.font = NSFont.systemFont(ofSize: 14)
         sl.textColor = .systemGreen
-        sl.frame = NSRect(x: 24, y: 155, width: 280, height: 20)
+        sl.frame = NSRect(x: 24, y: 175, width: 280, height: 20)
         content.addSubview(sl)
         self.statusLabel = sl
         
         // Divider
-        let divider2 = NSBox(frame: NSRect(x: 24, y: 145, width: 272, height: 1))
+        let divider2 = NSBox(frame: NSRect(x: 24, y: 165, width: 272, height: 1))
         divider2.boxType = .separator
         content.addSubview(divider2)
         
@@ -78,17 +78,18 @@ class MainWindow {
         let hotkeyTitle = NSTextField(labelWithString: "Shortcuts")
         hotkeyTitle.font = NSFont.systemFont(ofSize: 11, weight: .medium)
         hotkeyTitle.textColor = .secondaryLabelColor
-        hotkeyTitle.frame = NSRect(x: 24, y: 121, width: 280, height: 16)
+        hotkeyTitle.frame = NSRect(x: 24, y: 141, width: 280, height: 16)
         content.addSubview(hotkeyTitle)
         
         let hotkeys = [
             ("⌥ Space", "Toggle Recording"),
             ("⌃⌥ Space", "Translate to English"),
+            ("⌃⌥⌘ Space", "AI Command"),
             ("Esc", "Cancel Recording")
         ]
         
         for (i, (key, desc)) in hotkeys.enumerated() {
-            let y = 96 - i * 22
+            let y = 116 - i * 22
             
             let keyLabel = NSTextField(labelWithString: key)
             keyLabel.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .medium)

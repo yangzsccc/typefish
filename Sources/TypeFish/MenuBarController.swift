@@ -68,6 +68,10 @@ class MenuBarController {
         translateItem.isEnabled = false
         menu.addItem(translateItem)
         
+        let commandItem = NSMenuItem(title: "⌃⌥⌘ Space — AI Command", action: nil, keyEquivalent: "")
+        commandItem.isEnabled = false
+        menu.addItem(commandItem)
+        
         let escItem = NSMenuItem(title: "⎋ Esc — Cancel Recording", action: nil, keyEquivalent: "")
         escItem.isEnabled = false
         menu.addItem(escItem)
@@ -140,7 +144,10 @@ class MenuBarController {
         guard let button = statusItem.button else { return }
         
         if state.isRecording {
-            if state.isTranslateMode {
+            if state.isCommandMode {
+                button.image = createIcon(command: true)
+                button.toolTip = "TypeFish — AI Command..."
+            } else if state.isTranslateMode {
                 button.image = createIcon(translate: true)
                 button.toolTip = "TypeFish — Translating..."
             } else {
@@ -157,10 +164,15 @@ class MenuBarController {
     }
     
     /// Create a simple menu bar icon
-    private func createIcon(recording: Bool = false, processing: Bool = false, translate: Bool = false) -> NSImage {
+    private func createIcon(recording: Bool = false, processing: Bool = false, translate: Bool = false, command: Bool = false) -> NSImage {
         let size = NSSize(width: 18, height: 18)
         let image = NSImage(size: size, flipped: false) { rect in
-            if translate {
+            if command {
+                // Purple filled circle for AI command mode
+                NSColor.systemPurple.setFill()
+                let circle = NSBezierPath(ovalIn: rect.insetBy(dx: 3, dy: 3))
+                circle.fill()
+            } else if translate {
                 // Green filled circle for translate mode
                 NSColor.systemGreen.setFill()
                 let circle = NSBezierPath(ovalIn: rect.insetBy(dx: 3, dy: 3))
@@ -198,7 +210,7 @@ class MenuBarController {
             }
             return true
         }
-        image.isTemplate = !recording && !processing  // Template for dark/light mode (normal state only)
+        image.isTemplate = !recording && !processing && !command  // Template for dark/light mode (normal state only)
         return image
     }
     

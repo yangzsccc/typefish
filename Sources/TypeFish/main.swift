@@ -40,6 +40,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager.onTranslateToggle = { [weak self] in
             self?.state.toggleTranslateRecording()
         }
+        hotkeyManager.onCommandToggle = { [weak self] in
+            self?.state.toggleCommandRecording()
+        }
         hotkeyManager.onCancel = { [weak self] in
             self?.state.cancelRecording()
         }

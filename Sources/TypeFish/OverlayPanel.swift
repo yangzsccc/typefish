@@ -23,12 +23,16 @@ class OverlayPanel {
     
     /// Show animated equalizer bars (recording state)
     /// - Parameter translate: if true, use green color to indicate translate mode
-    func showRecording(translate: Bool = false) {
+    func showRecording(translate: Bool = false, command: Bool = false) {
         DispatchQueue.main.async { [weak self] in
             self?.dismissTimer?.invalidate()
             self?.ensureWindow()
             self?.checkmark?.isHidden = true
-            self?.setBarsVisible(true, translate: translate)
+            if command {
+                self?.setBarsVisible(true, translate: false, command: true)
+            } else {
+                self?.setBarsVisible(true, translate: translate)
+            }
             self?.fadeIn()
             self?.startBarAnimation()
         }
@@ -202,8 +206,12 @@ class OverlayPanel {
     private let translateBarColor = NSColor(white: 0.7, alpha: 1.0)  // light gray
     private var currentBarColor = NSColor(red: 0.45, green: 0.72, blue: 0.95, alpha: 1.0)
     
-    private func setBarsVisible(_ visible: Bool, translate: Bool = false) {
-        currentBarColor = translate ? translateBarColor : normalBarColor
+    private func setBarsVisible(_ visible: Bool, translate: Bool = false, command: Bool = false) {
+        if command {
+            currentBarColor = NSColor.systemPurple
+        } else {
+            currentBarColor = translate ? translateBarColor : normalBarColor
+        }
         for bar in bars {
             bar.isHidden = !visible
             if visible {

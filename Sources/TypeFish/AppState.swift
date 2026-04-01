@@ -19,8 +19,17 @@ class AppState: ObservableObject {
     /// When true, current recording will be translated to English
     private(set) var translateMode = false
     
+    /// When true, current recording is AI command mode (generate/edit)
+    private(set) var commandMode = false
+    
+    /// Selected text captured when command mode started
+    private var commandSelectedText: String?
+    
     /// Public accessor for menu bar icon
     var isTranslateMode: Bool { translateMode }
+    
+    /// Public accessor for command mode
+    var isCommandMode: Bool { commandMode }
     
     var config: AppConfig
     let recorder: AudioRecorder
@@ -82,6 +91,8 @@ class AppState: ObservableObject {
             stopAndProcess()
         } else {
             translateMode = false
+            commandMode = false
+            commandSelectedText = nil
             startRecording()
         }
     }
@@ -92,6 +103,35 @@ class AppState: ObservableObject {
             stopAndProcess()
         } else {
             translateMode = true
+            commandMode = false
+            startRecording()
+        }
+    }
+    
+    /// Toggle recording in AI command mode (generate/edit content)
+    func toggleCommandRecording() {
+        if isRecording {
+            stopAndProcess()
+        } else {
+            translateMode = false
+            commandMode = true
+            
+            // Capture selected text NOW before recording starts
+            // Save frontmost app first
+            PasteService.saveFrontmostApp()
+            
+            // Try AX API first, then clipboard simulation
+            commandSelectedText = ContextReader.readSelectedText()
+            if commandSelectedText == nil {
+                commandSelectedText = ContextReader.readSelectedTextViaClipboard()
+            }
+            
+            if let sel = commandSelectedText {
+                Log.info("🤖 AI Command: captured \(sel.count) chars of selected text")
+            } else {
+                Log.info("🤖 AI Command: no text selected (will generate from scratch)")
+            }
+            
             startRecording()
         }
     }
@@ -149,10 +189,20 @@ class AppState: ObservableObject {
         
         // Show UI IMMEDIATELY — don't wait for engine startup
         isRecording = true
-        statusText = translateMode ? "🌐 Recording (Translate)..." : "🔴 Recording..."
+        if commandMode {
+            statusText = "🤖 Recording (AI Command)..."
+        } else if translateMode {
+            statusText = "🌐 Recording (Translate)..."
+        } else {
+            statusText = "🔴 Recording..."
+        }
         onStateChange?()
         startSound?.play()
-        overlay.showRecording(translate: translateMode)
+        if commandMode {
+            overlay.showRecording(command: true)
+        } else {
+            overlay.showRecording(translate: translateMode)
+        }
         
         // Wire up audio level to overlay
         recorder.onAudioLevel = { [weak self] rms in
@@ -256,7 +306,11 @@ class AppState: ObservableObject {
         // Read context from current text field (before transcription starts)
         let fieldContext = ContextReader.readContext()
         
-        // Pipeline: Transcribe/Translate → Polish → Paste
+        // Capture mode flags before they get reset
+        let isCommandMode = self.commandMode
+        let capturedSelectedText = self.commandSelectedText
+        
+        // Pipeline: Transcribe/Translate → Polish → Paste (or AI Command)
         let vocabPrompt = dictionary.whisperPrompt()
         let isTranslating = self.translateMode
         
@@ -294,6 +348,66 @@ class AppState: ObservableObject {
             
             // Apply dictionary replacements
             let correctedText = self.dictionary.applyReplacements(rawText)
+            
+            // === AI Command Mode: branch here ===
+            if isCommandMode {
+                DispatchQueue.main.async {
+                    self.statusText = "🤖 AI generating..."
+                    self.onStateChange?()
+                }
+                
+                AICommand.process(
+                    instruction: correctedText,
+                    selectedText: capturedSelectedText,
+                    fieldContext: fieldContext,
+                    apiKey: apiKey
+                ) { result in
+                    DispatchQueue.main.async {
+                        guard let generated = result, !generated.isEmpty else {
+                            self.isProcessing = false
+                            self.statusText = "❌ AI failed"
+                            self.onStateChange?()
+                            self.overlay.dismiss()
+                            return
+                        }
+                        
+                        // Paste the generated content
+                        let pasted = PasteService.paste(generated)
+                        
+                        self.isProcessing = false
+                        self.statusText = "✅ Done"
+                        self.onStateChange?()
+                        
+                        if pasted {
+                            self.overlay.showDone()
+                        } else {
+                            self.overlay.showResult(generated)
+                        }
+                        
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                            if !self.isRecording && !self.isProcessing {
+                                self.statusText = "Ready"
+                                self.onStateChange?()
+                            }
+                        }
+                    }
+                    
+                    // Log it
+                    TranscriptionLogger.log(
+                        audioURL: audioURL,
+                        whisperRaw: whisperRawText,
+                        polished: result ?? "",
+                        mode: "command",
+                        whisperModel: self.config.whisperModel,
+                        polisherModel: "llama-3.3-70b-versatile",
+                        fieldContext: fieldContext
+                    )
+                    
+                    self.cleanup(audioURL)
+                    if processURL != audioURL { self.cleanup(processURL) }
+                }
+                return  // Don't fall through to normal polish pipeline
+            }
             
             DispatchQueue.main.async {
                 self.statusText = "✨ Polishing..."

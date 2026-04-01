@@ -15,6 +15,9 @@ class HotkeyManager {
     /// Called when translate hotkey is pressed (Option+Shift+Space)
     var onTranslateToggle: (() -> Void)?
     
+    /// Called when AI command hotkey is pressed (Ctrl+Option+Cmd+Space)
+    var onCommandToggle: (() -> Void)?
+    
     /// Called when Escape is pressed (cancel recording)
     var onCancel: (() -> Void)?
     
@@ -84,6 +87,14 @@ class HotkeyManager {
         let flags = event.flags
         let meaningful = NSEvent.ModifierFlags(rawValue: UInt(flags.rawValue))
             .intersection([.command, .shift, .control, .option])
+        
+        // Ctrl+Option+Cmd+Space — AI command mode
+        if meaningful == [.control, .option, .command] && keyCode == 49 {
+            DispatchQueue.main.async {
+                HotkeyManager.shared?.onCommandToggle?()
+            }
+            return nil  // Swallow the event
+        }
         
         // Ctrl+Option+Space (keyCode 49 = Space) — translate mode
         if meaningful == [.control, .option] && keyCode == 49 {

@@ -62,6 +62,69 @@ enum ContextReader {
         return (beforeCursor: fullText, afterCursor: "", fullContent: fullText)
     }
     
+    /// Read the currently selected text in the focused text field.
+    /// Returns nil if no text is selected or AX API fails.
+    static func readSelectedText() -> String? {
+        guard let app = PasteService.savedApp else { return nil }
+        
+        let pid = app.processIdentifier
+        let axApp = AXUIElementCreateApplication(pid)
+        
+        var focusedElement: AnyObject?
+        let focusResult = AXUIElementCopyAttributeValue(axApp, kAXFocusedUIElementAttribute as CFString, &focusedElement)
+        guard focusResult == .success, let element = focusedElement else { return nil }
+        
+        let axElement = element as! AXUIElement
+        
+        // Try AX selected text attribute
+        var selectedObj: AnyObject?
+        let selResult = AXUIElementCopyAttributeValue(axElement, kAXSelectedTextAttribute as CFString, &selectedObj)
+        if selResult == .success, let selectedText = selectedObj as? String, !selectedText.isEmpty {
+            return selectedText
+        }
+        
+        return nil
+    }
+    
+    /// Read selected text using clipboard simulation (Cmd+C).
+    /// Fallback for Electron/web apps where AX API fails.
+    /// Saves and restores the original clipboard content.
+    static func readSelectedTextViaClipboard() -> String? {
+        let pasteboard = NSPasteboard.general
+        
+        // Save current clipboard
+        let oldContents = pasteboard.string(forType: .string)
+        let oldChangeCount = pasteboard.changeCount
+        
+        // Simulate Cmd+C
+        let source = CGEventSource(stateID: .combinedSessionState)
+        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x08, keyDown: true)  // 'c'
+        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x08, keyDown: false)
+        keyDown?.flags = .maskCommand
+        keyUp?.flags = .maskCommand
+        keyDown?.post(tap: .cghidEventTap)
+        keyUp?.post(tap: .cghidEventTap)
+        
+        // Wait for clipboard to update
+        usleep(100_000)  // 100ms
+        
+        let newChangeCount = pasteboard.changeCount
+        let selectedText: String?
+        
+        if newChangeCount != oldChangeCount {
+            selectedText = pasteboard.string(forType: .string)
+            // Restore original clipboard
+            pasteboard.clearContents()
+            if let old = oldContents {
+                pasteboard.setString(old, forType: .string)
+            }
+        } else {
+            selectedText = nil
+        }
+        
+        return selectedText?.isEmpty == true ? nil : selectedText
+    }
+    
     /// Read the FULL text content of the currently focused text field.
     /// Used by EditTracker to monitor post-paste edits.
     /// Unlike readContext(), this returns the entire field value without truncation.
