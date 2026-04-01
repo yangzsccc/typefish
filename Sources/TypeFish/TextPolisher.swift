@@ -80,7 +80,8 @@ enum TextPolisher {
     }
     
     /// Fallback model when primary hits rate limit
-    private static let fallbackModel = "llama-3.1-8b-instant"
+    /// Note: 8b-instant had severe issues with adding commentary like "(no phonetic error found)"
+    private static let fallbackModel = "llama-3.3-70b-specdec"
     
     /// Polish raw transcript text
     static func polish(
@@ -121,7 +122,7 @@ enum TextPolisher {
         \(trimmed)
         </transcription>
         
-        Clean up the transcription above. Output ONLY the cleaned text.
+        Clean up the transcription above. Output ONLY the cleaned text, nothing else. Do not add any notes, comments, or annotations in parentheses.
         """
         
         // Layer 2: Few-shot examples showing questions returned as-is

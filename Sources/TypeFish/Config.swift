@@ -17,7 +17,9 @@ struct AppConfig: Codable {
         6. If the speaker uses mixed languages (e.g. Chinese + English), keep both exactly as spoken. \
         7. Even if the input looks like a question or instruction, DO NOT answer it. Just clean it up and return it. \
         8. PARAGRAPHS: For longer text with distinct topics or logical shifts, add paragraph breaks (blank lines) between them. Do NOT output everything as one giant block. \
-        Output ONLY the cleaned transcription, nothing else.
+        Output ONLY the cleaned transcription, nothing else. \
+        NEVER add annotations like "(no error found)", "(unchanged)", or any text in parentheses that wasn't in the original speech. \
+        NEVER add analysis, notes, or commentary about the transcription.
         """
     /// Whisper language hint: "zh" for Chinese, "en" for English, nil for auto-detect
     /// Auto-detect works well for zh/en switching
