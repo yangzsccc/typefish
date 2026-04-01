@@ -22,6 +22,24 @@ cp Sources/TypeFish/Sounds/*.aiff "TypeFish.app/Contents/Resources/" 2>/dev/null
 # Copy default dictionary
 cp default-dictionary.json "TypeFish.app/Contents/Resources/" 2>/dev/null || true
 
+# Generate app icon from source PNG
+if [ -f "Assets/AppIcon.png" ]; then
+    ICONSET="TypeFish.app/Contents/Resources/AppIcon.iconset"
+    mkdir -p "$ICONSET"
+    sips -z 16 16     "Assets/AppIcon.png" --out "$ICONSET/icon_16x16.png" >/dev/null 2>&1
+    sips -z 32 32     "Assets/AppIcon.png" --out "$ICONSET/icon_16x16@2x.png" >/dev/null 2>&1
+    sips -z 32 32     "Assets/AppIcon.png" --out "$ICONSET/icon_32x32.png" >/dev/null 2>&1
+    sips -z 64 64     "Assets/AppIcon.png" --out "$ICONSET/icon_32x32@2x.png" >/dev/null 2>&1
+    sips -z 128 128   "Assets/AppIcon.png" --out "$ICONSET/icon_128x128.png" >/dev/null 2>&1
+    sips -z 256 256   "Assets/AppIcon.png" --out "$ICONSET/icon_128x128@2x.png" >/dev/null 2>&1
+    sips -z 256 256   "Assets/AppIcon.png" --out "$ICONSET/icon_256x256.png" >/dev/null 2>&1
+    sips -z 512 512   "Assets/AppIcon.png" --out "$ICONSET/icon_256x256@2x.png" >/dev/null 2>&1
+    sips -z 512 512   "Assets/AppIcon.png" --out "$ICONSET/icon_512x512.png" >/dev/null 2>&1
+    sips -z 1024 1024 "Assets/AppIcon.png" --out "$ICONSET/icon_512x512@2x.png" >/dev/null 2>&1
+    iconutil -c icns "$ICONSET" -o "TypeFish.app/Contents/Resources/AppIcon.icns" 2>/dev/null
+    rm -rf "$ICONSET"
+fi
+
 # Create Info.plist
 cat > TypeFish.app/Contents/Info.plist << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -42,8 +60,10 @@ cat > TypeFish.app/Contents/Info.plist << 'PLIST'
     <string>TypeFish</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>LSUIElement</key>
-    <true/>
+    <false/>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSMicrophoneUsageDescription</key>

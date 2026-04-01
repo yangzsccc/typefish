@@ -243,22 +243,31 @@ enum TextPolisher {
                     .replacingOccurrences(of: "</transcription>", with: "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 
-                // Strip LLM inline commentary in parentheses
-                // e.g. "(no phonetic error found)", "(Note: ...)", "(unchanged)"
+                // Strip LLM inline commentary that leaks into output
+                // Matches both parenthesized and bare forms:
+                // "(no phonetic error found)", "NoPhoneticErrorFound", "(Note: ...)", etc.
                 let inlineGarbagePatterns = [
+                    // Parenthesized forms
                     "\\(no \\w+ (?:error|change|correction)s? found\\)",
                     "\\(unchanged\\)",
                     "\\(no changes?(?: needed| made| required)?\\)",
                     "\\(Note:.*?\\)",
                     "\\(注[：:].*?\\)",
+                    // Bare/camelCase forms the 8b model sometimes outputs
+                    "(?:^|\\s)No\\s*(?:Phonetic|Funetic|Speech|STT)\\s*(?:Error|Era|Change|Correction)s?\\s*(?:Found|Detected)?(?:\\s|$)",
+                    // Common LLM analysis leaks
+                    "\\[no (?:error|change|correction)s? found\\]",
+                    "NONE\\.?$",
                 ]
                 for pattern in inlineGarbagePatterns {
                     if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
                         let range = NSRange(polished.startIndex..., in: polished)
-                        let cleaned = regex.stringByReplacingMatches(in: polished, range: range, withTemplate: "")
-                        if cleaned != polished {
+                        let cleaned = regex.stringByReplacingMatches(in: polished, range: range, withTemplate: " ")
+                            .replacingOccurrences(of: "  ", with: " ")
+                        let trimCleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimCleaned != polished.trimmingCharacters(in: .whitespacesAndNewlines) && !trimCleaned.isEmpty {
                             Log.info("🧹 Stripped inline LLM commentary matching: \(pattern)")
-                            polished = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+                            polished = trimCleaned
                         }
                     }
                 }
