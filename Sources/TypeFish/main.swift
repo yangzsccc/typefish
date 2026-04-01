@@ -7,13 +7,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var state: AppState!
     var menuBar: MenuBarController!
     var hotkeyManager: HotkeyManager!
+    var mainWindow: MainWindow!
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.rotate()
         Log.info("🐟 TypeFish starting...")
         
-        // Menu bar only app (no dock icon)
-        NSApp.setActivationPolicy(.accessory)
+        // Show in Dock so user can find and restart the app easily
+        NSApp.setActivationPolicy(.regular)
         
         // Initialize state
         state = AppState()
@@ -28,6 +29,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Set up menu bar
         menuBar = MenuBarController(state: state)
         
+        // Set up main window (shown when clicking Dock icon)
+        mainWindow = MainWindow(state: state)
+        
         // Set up global hotkey
         hotkeyManager = HotkeyManager()
         hotkeyManager.onToggle = { [weak self] in
@@ -40,6 +44,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.state.cancelRecording()
         }
         hotkeyManager.start()
+        
+        // Chain main window updates to state changes (MenuBarController already set onStateChange)
+        let menuBarCallback = state.onStateChange
+        state.onStateChange = { [weak self] in
+            menuBarCallback?()
+            self?.mainWindow.updateStatus()
+        }
         
         // Listen for audio device changes (headphone connect/disconnect)
         // AudioRecorder handles engine restart internally.
@@ -72,6 +83,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.global().async {
             TranscriptionLogger.cleanOldFiles()
         }
+    }
+    
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // Show main window when Dock icon is clicked
+        mainWindow.showWindow()
+        return true
     }
     
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
