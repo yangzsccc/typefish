@@ -81,7 +81,9 @@ enum TextPolisher {
     
     /// Fallback model when primary hits rate limit
     /// Note: 8b-instant had severe issues with adding commentary like "(no phonetic error found)"
-    private static let fallbackModel = "llama-3.3-70b-specdec"
+    /// Note: 70b-specdec was decommissioned by Groq
+    /// Using same 70b model with retry — better to wait than use 8b
+    private static let fallbackModel = "llama-3.3-70b-versatile"
     
     /// Polish raw transcript text
     static func polish(
@@ -224,10 +226,19 @@ enum TextPolisher {
                 return
             }
             
-            // Check for rate limit (429) — fallback to smaller model
-            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 429, !isFallback {
-                Log.info("⚠️ Rate limited on \(model), falling back to \(fallbackModel)")
-                polish(text: text, apiKey: apiKey, model: fallbackModel, systemPrompt: systemPrompt, isFallback: true, completion: completion)
+            // Check for rate limit (429) — retry after delay (same model)
+            // Previously fell back to 8b which caused "(no phonetic error found)" contamination
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 429 {
+                if !isFallback {
+                    Log.info("⚠️ Rate limited on \(model), retrying in 3s with same model")
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 3.0) {
+                        polish(text: text, apiKey: apiKey, model: model, systemPrompt: systemPrompt, isFallback: true, completion: completion)
+                    }
+                } else {
+                    // Already retried once, just return raw text
+                    Log.info("⚠️ Rate limited twice, returning raw transcription")
+                    completion(trimmed)
+                }
                 return
             }
             

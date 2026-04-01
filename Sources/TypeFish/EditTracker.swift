@@ -403,7 +403,7 @@ class EditTracker {
         }
         
         let payload: [String: Any] = [
-            "model": "llama-3.1-8b-instant",
+            "model": "llama-3.3-70b-versatile",
             "messages": [
                 ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": userMessage]
@@ -440,8 +440,18 @@ class EditTracker {
             
             let result = content.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            if result == "NONE" || result.isEmpty {
-                Log.info("📝 EditTracker: no speech recognition corrections found")
+            // Treat various "no corrections" responses as NONE
+            let lowerResult = result.lowercased()
+            if result == "NONE" || result.isEmpty
+                || lowerResult.contains("no phonetic")
+                || lowerResult.contains("no speech")
+                || lowerResult.contains("no correction")
+                || lowerResult.contains("no error")
+                || lowerResult.contains("no stt")
+                || lowerResult.contains("none found")
+                || lowerResult.contains("no replacement")
+                || (lowerResult.hasPrefix("(") && lowerResult.hasSuffix(")") && lowerResult.contains("found")) {
+                Log.info("📝 EditTracker: no speech recognition corrections found (response: \(result.prefix(60)))")
                 return
             }
             
@@ -540,18 +550,40 @@ class EditTracker {
             return false
         }
         
-        // Reject if either side is too long (>30 chars — not a single word/phrase)
-        guard wrong.count <= 30, right.count <= 30 else {
+        // Reject if either side is too long (>20 chars — not a single word/phrase)
+        guard wrong.count <= 20, right.count <= 20 else {
             Log.info("📝 EditTracker: rejected (too long): \(wrong.prefix(20))... / \(right.prefix(20))...")
             return false
         }
         
+        // Reject if wrong and right are too different in length (>3x ratio = likely not phonetic)
+        let lenRatio = Double(max(wrong.count, right.count)) / Double(max(min(wrong.count, right.count), 1))
+        guard lenRatio <= 3.0 else {
+            Log.info("📝 EditTracker: rejected (length ratio \(String(format: "%.1f", lenRatio))): \(wrong) / \(right)")
+            return false
+        }
+        
         // Reject common LLM noise words
-        let noiseWords = ["wrong", "right", "none", "original", "corrected", "text", "word"]
+        let noiseWords = ["wrong", "right", "none", "original", "corrected", "text", "word", "error", "found", "phonetic"]
         let lowerWrong = wrong.lowercased()
         let lowerRight = right.lowercased()
         guard !noiseWords.contains(lowerWrong), !noiseWords.contains(lowerRight) else {
             Log.info("📝 EditTracker: rejected (noise word): \(wrong) / \(right)")
+            return false
+        }
+        
+        // Reject if either contains "(no phonetic" or similar LLM commentary
+        guard !lowerWrong.contains("phonetic"), !lowerRight.contains("phonetic"),
+              !lowerWrong.contains("error found"), !lowerRight.contains("error found") else {
+            Log.info("📝 EditTracker: rejected (LLM commentary): \(wrong) / \(right)")
+            return false
+        }
+        
+        // Reject if either side contains only common Chinese functional words
+        // (these are grammar edits, not phonetic corrections)
+        let functionalWords = Set(["的", "了", "是", "在", "有", "这", "那", "就", "也", "都", "不", "会", "到", "和"])
+        if functionalWords.contains(wrong) || functionalWords.contains(right) {
+            Log.info("📝 EditTracker: rejected (functional word): \(wrong) / \(right)")
             return false
         }
         
