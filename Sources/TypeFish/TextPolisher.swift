@@ -244,20 +244,44 @@ enum TextPolisher {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 
                 // Strip LLM inline commentary that leaks into output
-                // Matches both parenthesized and bare forms:
-                // "(no phonetic error found)", "NoPhoneticErrorFound", "(Note: ...)", etc.
+                // Phase 1: Direct string replacements (most reliable)
+                let directGarbage = [
+                    "(no phonetic error found)",
+                    "(No phonetic error found)",
+                    "(no phonetic errors found)",
+                    "(No phonetic errors found)",
+                    "(no speech error found)",
+                    "(no speech errors found)",
+                    "(no STT error found)",
+                    "(no errors found)",
+                    "(no changes needed)",
+                    "(no changes made)",
+                    "(no change needed)",
+                    "(unchanged)",
+                    "(Unchanged)",
+                    "No phonetic error found",
+                    "No phonetic errors found",
+                    "NoPhoneticErrorFound",
+                    "NoFuneticEraFound",
+                    "(no correction needed)",
+                    "(no corrections needed)",
+                    "(no correction found)",
+                    "(no corrections found)",
+                ]
+                for garbage in directGarbage {
+                    if polished.contains(garbage) {
+                        Log.info("🧹 Stripped LLM commentary: \(garbage)")
+                        polished = polished.replacingOccurrences(of: garbage, with: "")
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                }
+                
+                // Phase 2: Regex for patterns we can't enumerate
                 let inlineGarbagePatterns = [
-                    // Parenthesized forms
                     "\\(no \\w+ (?:error|change|correction)s? found\\)",
-                    "\\(unchanged\\)",
-                    "\\(no changes?(?: needed| made| required)?\\)",
                     "\\(Note:.*?\\)",
                     "\\(注[：:].*?\\)",
-                    // Bare/camelCase forms the 8b model sometimes outputs
-                    "(?:^|\\s)No\\s*(?:Phonetic|Funetic|Speech|STT)\\s*(?:Error|Era|Change|Correction)s?\\s*(?:Found|Detected)?(?:\\s|$)",
-                    // Common LLM analysis leaks
                     "\\[no (?:error|change|correction)s? found\\]",
-                    "NONE\\.?$",
                 ]
                 for pattern in inlineGarbagePatterns {
                     if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
