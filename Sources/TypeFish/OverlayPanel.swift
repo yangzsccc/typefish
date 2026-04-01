@@ -380,6 +380,128 @@ class OverlayPanel {
         })
     }
     
+    // MARK: - AI Command Notification
+    
+    private var commandWindow: NSPanel?
+    private var commandDismissTimer: Timer?
+    private var commandUndoCallback: (() -> Void)?
+    
+    /// Show a brief overlay displaying the recognized command + Undo button.
+    /// Similar to auto-learn notification but for AI Command mode.
+    func showCommandConfirmation(instruction: String, onUndo: @escaping () -> Void) {
+        DispatchQueue.main.async { [weak self] in
+            self?.presentCommandNotification(instruction: instruction, onUndo: onUndo)
+        }
+    }
+    
+    private func presentCommandNotification(instruction: String, onUndo: @escaping () -> Void) {
+        dismissCommandWindow()
+        
+        // Truncate long instructions
+        let displayText = instruction.count > 80
+            ? "🤖  " + String(instruction.prefix(77)) + "..."
+            : "🤖  " + instruction
+        
+        let font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        let textSize = (displayText as NSString).boundingRect(
+            with: NSSize(width: 380, height: 40),
+            options: [.usesLineFragmentOrigin],
+            attributes: [.font: font]
+        )
+        let undoBtnWidth: CGFloat = 48
+        let padding: CGFloat = 32
+        let panelWidth = min(max(textSize.width + undoBtnWidth + padding + 16, 200), 420)
+        let panelHeight: CGFloat = 32
+        
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isFloatingPanel = true
+        panel.level = .statusBar
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = true
+        panel.ignoresMouseEvents = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        
+        // Purple-tinted dark pill background
+        let bg = NSView(frame: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight))
+        bg.wantsLayer = true
+        bg.layer?.cornerRadius = panelHeight / 2
+        bg.layer?.backgroundColor = NSColor(red: 0.15, green: 0.08, blue: 0.22, alpha: 0.92).cgColor
+        bg.autoresizingMask = [.width, .height]
+        panel.contentView?.addSubview(bg)
+        
+        // Text label
+        let label = NSTextField(labelWithString: displayText)
+        label.font = font
+        label.textColor = NSColor(red: 0.85, green: 0.75, blue: 1.0, alpha: 1.0)
+        label.frame = NSRect(x: 14, y: 6, width: panelWidth - undoBtnWidth - 24, height: 20)
+        label.lineBreakMode = .byTruncatingTail
+        bg.addSubview(label)
+        
+        // Undo button
+        let undoBtn = NSButton(frame: NSRect(x: panelWidth - undoBtnWidth - 8, y: 4, width: undoBtnWidth, height: 24))
+        undoBtn.title = "Undo"
+        undoBtn.bezelStyle = .inline
+        undoBtn.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        undoBtn.contentTintColor = NSColor(red: 0.75, green: 0.6, blue: 1.0, alpha: 1.0)
+        undoBtn.isBordered = false
+        undoBtn.target = self
+        undoBtn.action = #selector(commandUndoClicked)
+        bg.addSubview(undoBtn)
+        
+        self.commandUndoCallback = onUndo
+        
+        // Position: bottom center, slightly above recording pill
+        let mouseLocation = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) ?? NSScreen.main ?? NSScreen.screens[0]
+        let sf = screen.visibleFrame
+        let x = sf.midX - panelWidth / 2
+        let y = sf.origin.y + 120  // Higher than recording pill (80)
+        panel.setFrame(NSRect(x: x, y: y, width: panelWidth, height: panelHeight), display: true)
+        
+        // Fade in
+        panel.alphaValue = 0
+        panel.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.2
+            panel.animator().alphaValue = 1.0
+        }
+        
+        self.commandWindow = panel
+        
+        // Auto-dismiss after 6 seconds (longer than auto-learn since user may need to read)
+        commandDismissTimer?.invalidate()
+        commandDismissTimer = Timer.scheduledTimer(withTimeInterval: 6.0, repeats: false) { [weak self] _ in
+            self?.dismissCommandWindow()
+        }
+    }
+    
+    @objc private func commandUndoClicked() {
+        Log.info("🤖 User clicked Undo on AI Command")
+        commandUndoCallback?()
+        commandUndoCallback = nil
+        dismissCommandWindow()
+    }
+    
+    func dismissCommandWindow() {
+        commandDismissTimer?.invalidate()
+        commandDismissTimer = nil
+        commandUndoCallback = nil
+        guard let w = commandWindow else { return }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.25
+            w.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            w.orderOut(nil)
+            self?.commandWindow = nil
+        })
+    }
+    
     // MARK: - Result Window (clipboard fallback)
     
     private var resultWindow: NSPanel?

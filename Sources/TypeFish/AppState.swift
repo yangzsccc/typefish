@@ -354,6 +354,13 @@ class AppState: ObservableObject {
                 DispatchQueue.main.async {
                     self.statusText = "🤖 AI generating..."
                     self.onStateChange?()
+                    
+                    // Show command instruction overlay so user can see what was recognized
+                    self.overlay.showCommandConfirmation(instruction: correctedText) {
+                        // Undo callback: Cmd+Z to revert the paste
+                        Log.info("🤖 Undoing AI command paste")
+                        PasteService.undo()
+                    }
                 }
                 
                 AICommand.process(
@@ -367,7 +374,7 @@ class AppState: ObservableObject {
                             self.isProcessing = false
                             self.statusText = "❌ AI failed"
                             self.onStateChange?()
-                            self.overlay.dismiss()
+                            self.overlay.dismissCommandWindow()
                             return
                         }
                         
@@ -378,11 +385,11 @@ class AppState: ObservableObject {
                         self.statusText = "✅ Done"
                         self.onStateChange?()
                         
-                        if pasted {
-                            self.overlay.showDone()
-                        } else {
+                        if !pasted {
+                            self.overlay.dismissCommandWindow()
                             self.overlay.showResult(generated)
                         }
+                        // Command notification stays visible with Undo button
                         
                         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                             if !self.isRecording && !self.isProcessing {

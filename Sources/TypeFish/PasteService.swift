@@ -107,4 +107,26 @@ enum PasteService {
             keyUp.post(tap: .cghidEventTap)
         }
     }
+    
+    /// Simulate Cmd+Z (Undo) in the target app
+    static func undo() {
+        // Activate the target app first
+        if let app = savedApp {
+            app.activate(options: [])
+            usleep(50_000)  // 50ms
+        }
+        
+        let source = CGEventSource(stateID: .hidSystemState)
+        
+        // Key code 6 = 'Z'
+        if let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 6, keyDown: true) {
+            keyDown.flags = .maskCommand
+            keyDown.post(tap: .cghidEventTap)
+        }
+        usleep(10_000)
+        if let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 6, keyDown: false) {
+            keyUp.flags = .maskCommand
+            keyUp.post(tap: .cghidEventTap)
+        }
+    }
 }
