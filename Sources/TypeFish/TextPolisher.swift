@@ -243,6 +243,26 @@ enum TextPolisher {
                     .replacingOccurrences(of: "</transcription>", with: "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 
+                // Strip LLM inline commentary in parentheses
+                // e.g. "(no phonetic error found)", "(Note: ...)", "(unchanged)"
+                let inlineGarbagePatterns = [
+                    "\\(no \\w+ (?:error|change|correction)s? found\\)",
+                    "\\(unchanged\\)",
+                    "\\(no changes?(?: needed| made| required)?\\)",
+                    "\\(Note:.*?\\)",
+                    "\\(注[：:].*?\\)",
+                ]
+                for pattern in inlineGarbagePatterns {
+                    if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+                        let range = NSRange(polished.startIndex..., in: polished)
+                        let cleaned = regex.stringByReplacingMatches(in: polished, range: range, withTemplate: "")
+                        if cleaned != polished {
+                            Log.info("🧹 Stripped inline LLM commentary matching: \(pattern)")
+                            polished = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+                        }
+                    }
+                }
+                
                 // Layer 3a: Length guard — if output is >1.8x longer, LLM probably added content
                 // (1.8x instead of 1.5x to allow email formatting with line breaks)
                 let ratio = Double(polished.count) / Double(trimmed.count)
