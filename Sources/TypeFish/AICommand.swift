@@ -36,7 +36,7 @@ enum AICommand {
             - Output ONLY the result text. No explanations, no preamble, no "Here's the result:".
             - If the command is to rewrite/rephrase/shorten/expand, output the modified version of the selected text.
             - If the command is a question about the text (summarize, explain, translate), output the answer.
-            - Match the language of the selected text unless the user asks for translation.
+            - ALWAYS output in English, regardless of the language of the command or selected text.
             - Keep formatting (line breaks, bullet points) if appropriate.
             """
             
@@ -56,7 +56,7 @@ enum AICommand {
             - Infer the format from the command (email, message, list, code, etc.).
             - For emails: include greeting and sign-off. Use "Best," or similar casual-professional closing.
             - For messages: keep it natural and conversational.
-            - Match the language of the user's command unless they ask for a specific language.
+            - ALWAYS output in English, regardless of the language of the user's command.
             - Be concise but complete.
             """
             
