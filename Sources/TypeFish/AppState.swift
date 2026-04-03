@@ -271,13 +271,19 @@ class AppState: ObservableObject {
             processURL = audioURL
         }
         
+        // Compress audio for faster upload (WAV → M4A, ~10x smaller)
+        var uploadURL = processURL
+        if let compressedURL = AudioCompressor.compressToM4A(wavURL: processURL) {
+            uploadURL = compressedURL
+        }
+        
         isProcessing = true
         statusText = "⏳ Transcribing..."
         onStateChange?()
         
         overlay.showProcessing()
         
-        // Safety: force-reset after 30s to prevent permanent stuck
+        // Safety: force-reset after 60s to prevent permanent stuck
         processingTimeout?.invalidate()
         processingTimeout = Timer.scheduledTimer(withTimeInterval: maxProcessingTime, repeats: false) { [weak self] _ in
             guard let self = self, self.isProcessing else { return }
@@ -337,7 +343,7 @@ class AppState: ObservableObject {
                     self.overlay.dismiss()
                 }
                 self.cleanup(audioURL)
-                if processURL != audioURL { self.cleanup(processURL) }
+                if processURL != audioURL { self.cleanup(processURL) }; if uploadURL != processURL { self.cleanup(uploadURL) }
                 return
             }
             
@@ -351,7 +357,7 @@ class AppState: ObservableObject {
                     self.overlay.dismiss()
                 }
                 self.cleanup(audioURL)
-                if processURL != audioURL { self.cleanup(processURL) }
+                if processURL != audioURL { self.cleanup(processURL) }; if uploadURL != processURL { self.cleanup(uploadURL) }
                 return
             }
             
@@ -423,7 +429,7 @@ class AppState: ObservableObject {
                     )
                     
                     self.cleanup(audioURL)
-                    if processURL != audioURL { self.cleanup(processURL) }
+                    if processURL != audioURL { self.cleanup(processURL) }; if uploadURL != processURL { self.cleanup(uploadURL) }
                 }
                 return  // Don't fall through to normal polish pipeline
             }
@@ -433,10 +439,17 @@ class AppState: ObservableObject {
                 self.onStateChange?()
             }
             
-            // Build polisher prompt with dictionary reference + field context
+            // Build polisher prompt with dictionary reference + field context + app tone
             var fullSystemPrompt = self.config.polisherSystemPrompt
             if let ref = self.dictionary.polisherReference() {
                 fullSystemPrompt += "\n\n" + ref
+            }
+            if let toneMod = AppToneAdapter.tonePromptModifier() {
+                fullSystemPrompt += "\n\n" + toneMod
+                Log.info("🎭 Tone: \(AppToneAdapter.detectTone().rawValue)")
+            }
+            if let personalization = StyleLearner.shared.polisherPersonalization() {
+                fullSystemPrompt += "\n\n" + personalization
             }
             if let ctx = fieldContext, !ctx.isEmpty {
                 fullSystemPrompt += "\n\nThe user is typing into a text field that already contains the following text (before the cursor). Use this context to make the new transcription flow naturally — match the tone, avoid repeating what's already written, and connect smoothly:\n<existing_text>\n\(ctx)\n</existing_text>"
@@ -466,6 +479,13 @@ class AppState: ObservableObject {
                     
                     // Try to paste to cursor
                     let pasted = PasteService.paste(finalText)
+                    
+                    // Record successful transcription for style learning
+                    StyleLearner.shared.recordSuccess(
+                        raw: whisperRawText,
+                        polished: finalText,
+                        appName: PasteService.savedApp?.localizedName ?? "unknown"
+                    )
                     
                     self.isProcessing = false
                     self.statusText = "✅ Done"
@@ -508,16 +528,16 @@ class AppState: ObservableObject {
                 )
                 
                 self.cleanup(audioURL)
-                if processURL != audioURL { self.cleanup(processURL) }
+                if processURL != audioURL { self.cleanup(processURL) }; if uploadURL != processURL { self.cleanup(uploadURL) }
             }
         }
         
-        // Call the appropriate Whisper endpoint
+        // Call the appropriate Whisper endpoint (use compressed file if available)
         if isTranslating {
             Log.info("🌐 Translate mode: will translate to English")
-            WhisperAPI.translate(fileURL: processURL, apiKey: apiKey, model: config.whisperModel, prompt: vocabPrompt, completion: whisperCallback)
+            WhisperAPI.translate(fileURL: uploadURL, apiKey: apiKey, model: config.whisperModel, prompt: vocabPrompt, completion: whisperCallback)
         } else {
-            WhisperAPI.transcribe(fileURL: processURL, apiKey: apiKey, model: config.whisperModel, language: config.whisperLanguage, prompt: vocabPrompt, completion: whisperCallback)
+            WhisperAPI.transcribe(fileURL: uploadURL, apiKey: apiKey, model: config.whisperModel, language: config.whisperLanguage, prompt: vocabPrompt, completion: whisperCallback)
         }
     }
     

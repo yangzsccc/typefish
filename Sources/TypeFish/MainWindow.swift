@@ -153,7 +153,8 @@ class MainWindow {
         let stats = MetricsLogger.recentStats(hours: 24)
         if stats.total == 0 { return "No transcriptions yet" }
         let rate = stats.total > 0 ? Int(Double(stats.success) / Double(stats.total) * 100) : 0
-        var text = "✅ \(stats.success)/\(stats.total) (\(rate)%)"
+        let styleProgress = StyleLearner.shared.progressPercent
+        var text = "✅ \(stats.success)/\(stats.total) (\(rate)%) · 🧠 \(styleProgress)%"
         if !stats.errors.isEmpty {
             let errStr = stats.errors.map { "\($0.key):\($0.value)" }.joined(separator: " ")
             text += " · ❌ \(errStr)"
