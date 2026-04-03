@@ -310,6 +310,14 @@ class AppState: ObservableObject {
         let isCommandMode = self.commandMode
         let capturedSelectedText = self.commandSelectedText
         
+        // Metrics tracking
+        let pipelineStartTime = CFAbsoluteTimeGetCurrent()
+        var metrics = MetricsLogger.PipelineMetrics()
+        metrics.mode = isCommandMode ? "command" : (self.translateMode ? "translate" : "transcribe")
+        metrics.audioSizeKB = (try? FileManager.default.attributesOfItem(atPath: processURL.path)[.size] as? Int).flatMap { $0 / 1024 } ?? 0
+        metrics.whisperModel = self.config.whisperModel
+        metrics.polishModel = self.config.polisherModel
+        
         // Pipeline: Transcribe/Translate → Polish → Paste (or AI Command)
         let vocabPrompt = dictionary.whisperPrompt()
         let isTranslating = self.translateMode
@@ -318,6 +326,10 @@ class AppState: ObservableObject {
             guard let self = self else { return }
             
             guard !rawText.isEmpty else {
+                metrics.success = false
+                metrics.errorType = "no_speech"
+                metrics.totalTimeMs = Int((CFAbsoluteTimeGetCurrent() - pipelineStartTime) * 1000)
+                MetricsLogger.log(metrics)
                 DispatchQueue.main.async {
                     self.isProcessing = false
                     self.statusText = "❌ No speech detected"

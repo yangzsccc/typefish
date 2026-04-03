@@ -23,7 +23,7 @@ class MainWindow {
         }
         
         let w = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 300),
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 320),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -105,17 +105,23 @@ class MainWindow {
         }
         
         // Divider
-        let divider3 = NSBox(frame: NSRect(x: 24, y: 40, width: 272, height: 1))
+        let divider3 = NSBox(frame: NSRect(x: 24, y: 56, width: 272, height: 1))
         divider3.boxType = .separator
         content.addSubview(divider3)
         
-        // Dictionary stats
-        let dl = NSTextField(labelWithString: dictionaryStatsText())
-        dl.font = NSFont.systemFont(ofSize: 11)
-        dl.textColor = .secondaryLabelColor
-        dl.frame = NSRect(x: 24, y: 16, width: 280, height: 18)
-        content.addSubview(dl)
-        self.dictLabel = dl
+        // Health stats
+        let healthTitle = NSTextField(labelWithString: "Health (24h)")
+        healthTitle.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        healthTitle.textColor = .secondaryLabelColor
+        healthTitle.frame = NSRect(x: 24, y: 36, width: 280, height: 16)
+        content.addSubview(healthTitle)
+        
+        let hl = NSTextField(labelWithString: healthStatsText())
+        hl.font = NSFont.systemFont(ofSize: 11)
+        hl.textColor = .secondaryLabelColor
+        hl.frame = NSRect(x: 24, y: 16, width: 280, height: 18)
+        content.addSubview(hl)
+        self.dictLabel = hl
         
         w.contentView = content
         self.window = w
@@ -140,12 +146,21 @@ class MainWindow {
             statusLabel?.textColor = .systemGreen
         }
         
-        dictLabel?.stringValue = dictionaryStatsText()
+        dictLabel?.stringValue = healthStatsText()
     }
     
-    private func dictionaryStatsText() -> String {
-        guard let state = state else { return "" }
-        let d = state.dictionary
-        return "📖 \(d.hints.count) hints · \(d.replacements.count) replacements · \(d.vocabulary.count) vocab"
+    private func healthStatsText() -> String {
+        let stats = MetricsLogger.recentStats(hours: 24)
+        if stats.total == 0 { return "No transcriptions yet" }
+        let rate = stats.total > 0 ? Int(Double(stats.success) / Double(stats.total) * 100) : 0
+        var text = "✅ \(stats.success)/\(stats.total) (\(rate)%)"
+        if !stats.errors.isEmpty {
+            let errStr = stats.errors.map { "\($0.key):\($0.value)" }.joined(separator: " ")
+            text += " · ❌ \(errStr)"
+        }
+        if stats.avgWhisperMs > 0 {
+            text += " · ⏱ \(stats.avgWhisperMs)ms"
+        }
+        return text
     }
 }

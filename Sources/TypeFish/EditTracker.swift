@@ -32,6 +32,8 @@ class EditTracker {
     
     /// Prevent tracking during certain states
     private var isAnalyzing = false
+    private var keypressLogCount = 0
+    private var cannotReadLogCount = 0
     
     /// Debounce work item for keypress handling
     private var debounceWorkItem: DispatchWorkItem?
@@ -131,6 +133,16 @@ class EditTracker {
         lastChangeTime = nil
         lastFieldContent = nil
         
+        // Log summary of suppressed messages
+        if cannotReadLogCount > 1 {
+            Log.info("📝 EditTracker: 'cannot read field content' occurred \(cannotReadLogCount) times total")
+        }
+        if keypressLogCount > 1 {
+            Log.info("📝 EditTracker: \(keypressLogCount) keypresses detected total")
+        }
+        keypressLogCount = 0
+        cannotReadLogCount = 0
+        
         // Disable keyboard tracking
         HotkeyManager.shared?.isTrackingEdits = false
         HotkeyManager.shared?.onAnyKeyPress = nil
@@ -159,12 +171,16 @@ class EditTracker {
         debounceWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + debounceDelay, execute: workItem)
         
-        Log.info("📝 EditTracker: keypress detected, waiting \(Int(debounceDelay * 1000))ms...")
+        // Only log first keypress to reduce noise (hundreds of these in Discord)
+        if keypressLogCount == 0 {
+            Log.info("📝 EditTracker: keypress detected, waiting \(Int(debounceDelay * 1000))ms...")
+        }
+        keypressLogCount += 1
     }
     
     /// Called when Enter key is pressed — trigger immediate analysis
     private func handleEnterKey() {
-        Log.info("📝 EditTracker: Enter key pressed, triggering immediate analysis")
+        Log.info("📝 EditTracker: Enter key pressed, triggering immediate analysis (after \(keypressLogCount) keypresses)")
         debounceWorkItem?.cancel()
         readAndCheckForEdits(immediate: true)
     }
@@ -200,7 +216,10 @@ class EditTracker {
             Log.info("📝 EditTracker: cursor reading failed, using full content")
             currentContent = fullContent
         } else {
-            Log.info("📝 EditTracker: cannot read field content")
+            cannotReadLogCount += 1
+            if cannotReadLogCount == 1 {
+                Log.info("📝 EditTracker: cannot read field content (further occurrences suppressed)")
+            }
             return
         }
         

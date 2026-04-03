@@ -37,7 +37,11 @@ struct CustomDictionary: Codable {
             return dict
         }
         Log.info("📖 Dictionary: \(dict.hints.count) hints, \(dict.replacements.count) replacements, \(dict.vocabulary.count) vocab")
-        return dict
+        var sanitized = dict
+        if sanitized.sanitizeReplacements() {
+            sanitized.save()
+        }
+        return sanitized
     }
     
     /// Load defaults from bundled file
@@ -58,6 +62,54 @@ struct CustomDictionary: Codable {
         
         Log.info("📖 No defaults found, starting empty")
         return CustomDictionary()
+    }
+    
+    /// Remove garbage auto-learned replacements.
+    /// Returns true if any were removed.
+    mutating func sanitizeReplacements() -> Bool {
+        var removed: [String] = []
+        
+        for (wrong, right) in replacements {
+            let lowerRight = right.lowercased()
+            let lowerWrong = wrong.lowercased()
+            
+            // Remove if value contains LLM commentary
+            if lowerRight.contains("phonetic") || lowerRight.contains("error found")
+                || lowerRight.contains("no correction") || lowerRight.contains("unchanged") {
+                removed.append("\(wrong) → \(right)")
+                continue
+            }
+            
+            // Remove if key contains LLM commentary
+            if lowerWrong.contains("phonetic") || lowerWrong.contains("error found") {
+                removed.append("\(wrong) → \(right)")
+                continue
+            }
+            
+            // Remove reversed/garbled text (detect by checking if chars are mostly non-ASCII in wrong order)
+            let hasWeirdMix = wrong.unicodeScalars.contains(where: { $0.value > 0x4E00 })
+                && wrong.unicodeScalars.contains(where: { $0.value < 128 && CharacterSet.letters.contains($0) })
+                && wrong.count > 10
+            if hasWeirdMix && !right.contains(wrong.prefix(3)) {
+                // Long mixed text that doesn't overlap with replacement — likely garbage
+                let ratio = Double(max(wrong.count, right.count)) / Double(max(min(wrong.count, right.count), 1))
+                if ratio > 3.0 {
+                    removed.append("\(wrong) → \(right)")
+                    continue
+                }
+            }
+        }
+        
+        if !removed.isEmpty {
+            for entry in removed {
+                let key = String(entry.split(separator: " ")[0])
+                replacements.removeValue(forKey: key)
+            }
+            Log.info("🧹 Sanitized \(removed.count) garbage dictionary entries:")
+            for r in removed { Log.info("   🗑 \(r)") }
+        }
+        
+        return !removed.isEmpty
     }
     
     /// Save to disk (pretty-printed for easy editing)

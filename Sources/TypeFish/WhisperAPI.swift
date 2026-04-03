@@ -52,6 +52,7 @@ enum WhisperAPI {
         model: String,
         language: String?,
         prompt: String?,
+        isRetry: Bool = false,
         completion: @escaping (String) -> Void
     ) {
         guard let url = URL(string: "https://api.groq.com/openai/v1/audio/\(endpoint)") else {
@@ -109,6 +110,12 @@ enum WhisperAPI {
             
             if let error = error {
                 Log.info("❌ \(mode) error: \(error.localizedDescription)")
+                // Auto-retry once on timeout
+                if !isRetry && error.localizedDescription.contains("timed out") {
+                    Log.info("🔄 \(mode): retrying after timeout...")
+                    callWhisper(endpoint: endpoint, fileURL: fileURL, apiKey: apiKey, model: model, language: language, prompt: prompt, isRetry: true, completion: completion)
+                    return
+                }
                 completion("")
                 return
             }
