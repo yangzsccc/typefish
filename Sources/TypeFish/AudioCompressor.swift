@@ -40,7 +40,7 @@ enum AudioCompressor {
             AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: inputFormat.sampleRate,
             AVNumberOfChannelsKey: 1,
-            AVEncoderBitRateKey: 32000,  // 32kbps — good enough for speech
+            AVEncoderBitRateKey: 64000,  // 64kbps — Whisper-recommended for speech quality
         ]
         
         guard let outputFile = try? AVAudioFile(
