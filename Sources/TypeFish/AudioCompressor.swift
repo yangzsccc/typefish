@@ -8,7 +8,7 @@ enum AudioCompressor {
     
     /// Compress a WAV file to M4A. Returns the compressed file URL, or nil on failure.
     /// On failure, returns the original WAV URL so transcription can proceed.
-    static func compressToM4A(wavURL: URL) -> URL? {
+    static func compressToM4A(wavURL: URL, bitrate: Int = 64000) -> URL? {
         let startTime = CFAbsoluteTimeGetCurrent()
         let m4aURL = wavURL.deletingPathExtension().appendingPathExtension("m4a")
         
@@ -40,7 +40,7 @@ enum AudioCompressor {
             AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: inputFormat.sampleRate,
             AVNumberOfChannelsKey: 1,
-            AVEncoderBitRateKey: 64000,  // 64kbps — Whisper-recommended for speech quality
+            AVEncoderBitRateKey: bitrate,
         ]
         
         guard let outputFile = try? AVAudioFile(

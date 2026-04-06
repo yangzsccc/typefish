@@ -26,6 +26,10 @@ struct AppConfig: Codable {
     var whisperLanguage: String? = nil
     var audioSampleRate: Double = 16000
     
+    /// Audio compression bitrate for M4A upload.
+    /// 0 = disabled (upload WAV), otherwise use AAC bitrate in bps (e.g. 32000/64000/96000)
+    var audioCompressionBitrate: Int = 64000
+    
     /// Preferred microphone device ID or name (partial match).
     /// nil = system default. Set to e.g. "Studio Display" to always use that mic.
     var preferredMicrophone: String? = nil

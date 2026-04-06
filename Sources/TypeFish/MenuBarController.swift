@@ -117,6 +117,22 @@ class MenuBarController {
         
         menu.addItem(NSMenuItem.separator())
         
+        // Audio compression selection
+        let compHeader = NSMenuItem(title: "🗜️ Audio Compression", action: nil, keyEquivalent: "")
+        compHeader.isEnabled = false
+        menu.addItem(compHeader)
+        
+        let currentComp = compressionTitle(for: state.config.audioCompressionBitrate)
+        let compItem = NSMenuItem(title: "  Current: \(currentComp)", action: nil, keyEquivalent: "")
+        compItem.isEnabled = false
+        menu.addItem(compItem)
+        
+        let selectCompItem = NSMenuItem(title: "  Select Compression...", action: #selector(selectCompression), keyEquivalent: "")
+        selectCompItem.target = self
+        menu.addItem(selectCompItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        
         let pairTypelessItem = NSMenuItem(title: "📋 Pair Typeless Result", action: #selector(pairTypelessResult), keyEquivalent: "t")
         pairTypelessItem.target = self
         menu.addItem(pairTypelessItem)
@@ -412,6 +428,54 @@ class MenuBarController {
         
         showNotification("🎤 Microphone: \(selected)")
         Log.info("🎤 Microphone preference saved: \(selected)")
+    }
+    
+    @objc private func selectCompression() {
+        let alert = NSAlert()
+        alert.messageText = "Audio Compression"
+        alert.informativeText = "Choose upload compression level. Higher compression = faster upload, lower accuracy."
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 340, height: 28))
+        let options: [(String, Int)] = [
+            ("Off (WAV, best quality, slowest)", 0),
+            ("Aggressive (32kbps, fastest)", 32000),
+            ("Fast (48kbps)", 48000),
+            ("Balanced (64kbps, default)", 64000),
+            ("Quality (96kbps)", 96000)
+        ]
+        for (title, _) in options { popup.addItem(withTitle: title) }
+        
+        let current = state.config.audioCompressionBitrate
+        if let idx = options.firstIndex(where: { $0.1 == current }) {
+            popup.selectItem(at: idx)
+        } else {
+            popup.selectItem(at: 3) // default 64kbps
+        }
+        
+        alert.accessoryView = popup
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        
+        let selectedIndex = popup.indexOfSelectedItem
+        let selected = options[max(0, min(selectedIndex, options.count - 1))]
+        state.config.audioCompressionBitrate = selected.1
+        saveConfig(state.config)
+        
+        showNotification("🗜️ Compression: \(compressionTitle(for: selected.1))")
+        Log.info("🗜️ Compression bitrate saved: \(selected.1) bps")
+    }
+    
+    private func compressionTitle(for bitrate: Int) -> String {
+        switch bitrate {
+        case 0: return "Off (WAV)"
+        case 32000: return "Aggressive (32kbps)"
+        case 48000: return "Fast (48kbps)"
+        case 64000: return "Balanced (64kbps)"
+        case 96000: return "Quality (96kbps)"
+        default: return "Custom (\(bitrate/1000)kbps)"
+        }
     }
     
     private func saveConfig(_ config: AppConfig) {

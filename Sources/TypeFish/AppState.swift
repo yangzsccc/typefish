@@ -271,10 +271,15 @@ class AppState: ObservableObject {
             processURL = audioURL
         }
         
-        // Compress audio for faster upload (WAV → M4A, ~10x smaller)
+        // Compress audio for faster upload (WAV → M4A), configurable bitrate
         var uploadURL = processURL
-        if let compressedURL = AudioCompressor.compressToM4A(wavURL: processURL) {
-            uploadURL = compressedURL
+        let bitrate = max(0, config.audioCompressionBitrate)
+        if bitrate > 0 {
+            if let compressedURL = AudioCompressor.compressToM4A(wavURL: processURL, bitrate: bitrate) {
+                uploadURL = compressedURL
+            }
+        } else {
+            Log.info("🗜️ Compression disabled, using WAV upload")
         }
         
         isProcessing = true
