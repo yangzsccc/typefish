@@ -474,7 +474,7 @@ class EditTracker {
                 return
             }
             
-            let corrections = self?.parseCorrections(result) ?? []
+            let corrections = self?.parseCorrections(result, sourceText: pastedText, editedText: cappedField) ?? []
             
             if corrections.isEmpty {
                 Log.info("📝 EditTracker: no valid corrections parsed from: \(result)")
@@ -521,13 +521,13 @@ class EditTracker {
     // MARK: - Parsing
     
     /// Parse "wrong → right" lines from LLM output
-    private func parseCorrections(_ text: String) -> [(String, String)] {
+    private func parseCorrections(_ text: String, sourceText: String, editedText: String) -> [(String, String)] {
         var corrections: [(String, String)] = []
-        
+
         for line in text.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
-            
+
             // Try arrow formats: →, ->, =>
             let separators = [" → ", "→", " -> ", "->", " => ", "=>"]
             for sep in separators {
@@ -538,75 +538,184 @@ class EditTracker {
                     let right = String(trimmed[range.upperBound...])
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                         .trimmingCharacters(in: CharacterSet(charactersIn: "\"'`-•"))
-                    
-                    // Validate the correction
-                    if isValidCorrection(wrong: wrong, right: right) {
+
+                    // Context-aware validation
+                    if isValidCorrection(wrong: wrong, right: right, sourceText: sourceText, editedText: editedText) {
                         corrections.append((wrong, right))
                     }
                     break
                 }
             }
         }
-        
+
         return corrections
     }
-    
-    /// Validate that a correction makes sense before adding to dictionary
-    private func isValidCorrection(wrong: String, right: String) -> Bool {
+
+    // MARK: - Validation Hard-Gates
+
+    /// Context-aware validation: candidate must pass ALL gates to be accepted.
+    private func isValidCorrection(wrong: String, right: String, sourceText: String, editedText: String) -> Bool {
         // Both must be non-empty and different
         guard !wrong.isEmpty, !right.isEmpty, wrong != right else { return false }
-        
-        // Reject if either side contains arrow characters (parsing artifact)
+
+        // --- Gate 0: Parsing artifact rejection ---
         guard !wrong.contains("→"), !right.contains("→"),
               !wrong.contains("->"), !right.contains("->") else {
-            Log.info("📝 EditTracker: rejected (contains arrow): \(wrong) / \(right)")
+            Log.info("📝 REJECT (arrow artifact): \(wrong) / \(right)")
             return false
         }
-        
-        // Reject very short words that are likely parsing noise
+
+        // --- Gate 1: Length bounds ---
         guard wrong.count >= 2, right.count >= 2 else {
-            Log.info("📝 EditTracker: rejected (too short): \(wrong) / \(right)")
+            Log.info("📝 REJECT (too short): \(wrong) / \(right)")
             return false
         }
-        
-        // Reject if either side is too long (>20 chars — not a single word/phrase)
         guard wrong.count <= 20, right.count <= 20 else {
-            Log.info("📝 EditTracker: rejected (too long): \(wrong.prefix(20))... / \(right.prefix(20))...")
+            Log.info("📝 REJECT (too long): \(wrong.prefix(20))... / \(right.prefix(20))...")
             return false
         }
-        
-        // Reject if wrong and right are too different in length (>3x ratio = likely not phonetic)
+
+        // --- Gate 2: Length ratio <= 2.0, absolute diff <= 4 ---
         let lenRatio = Double(max(wrong.count, right.count)) / Double(max(min(wrong.count, right.count), 1))
-        guard lenRatio <= 3.0 else {
-            Log.info("📝 EditTracker: rejected (length ratio \(String(format: "%.1f", lenRatio))): \(wrong) / \(right)")
+        guard lenRatio <= 2.0 else {
+            Log.info("📝 REJECT (length ratio \(String(format: "%.1f", lenRatio))x): \(wrong) / \(right)")
             return false
         }
-        
-        // Reject common LLM noise words
-        let noiseWords = ["wrong", "right", "none", "original", "corrected", "text", "word", "error", "found", "phonetic"]
+        let absDiff = abs(wrong.count - right.count)
+        guard absDiff <= 4 else {
+            Log.info("📝 REJECT (abs length diff \(absDiff)): \(wrong) / \(right)")
+            return false
+        }
+
+        // --- Gate 3: Source-of-truth — wrong must appear in STT, right in edited ---
+        guard sourceText.contains(wrong) else {
+            Log.info("📝 REJECT (wrong not in source STT): [\(wrong)] not found in [\(sourceText.prefix(80))]")
+            return false
+        }
+        guard editedText.contains(right) else {
+            Log.info("📝 REJECT (right not in edited text): [\(right)] not found in [\(editedText.prefix(80))]")
+            return false
+        }
+
+        // --- Gate 4: Blocklist — LLM noise + functional words + common junk ---
         let lowerWrong = wrong.lowercased()
         let lowerRight = right.lowercased()
+
+        let noiseWords: Set<String> = [
+            "wrong", "right", "none", "original", "corrected", "text", "word",
+            "error", "found", "phonetic", "correction", "replacement", "unchanged",
+            "speech", "transcription", "stt"
+        ]
         guard !noiseWords.contains(lowerWrong), !noiseWords.contains(lowerRight) else {
-            Log.info("📝 EditTracker: rejected (noise word): \(wrong) / \(right)")
+            Log.info("📝 REJECT (noise word): \(wrong) / \(right)")
             return false
         }
-        
-        // Reject if either contains "(no phonetic" or similar LLM commentary
+
         guard !lowerWrong.contains("phonetic"), !lowerRight.contains("phonetic"),
-              !lowerWrong.contains("error found"), !lowerRight.contains("error found") else {
-            Log.info("📝 EditTracker: rejected (LLM commentary): \(wrong) / \(right)")
+              !lowerWrong.contains("error found"), !lowerRight.contains("error found"),
+              !lowerWrong.contains("no correction"), !lowerRight.contains("no correction") else {
+            Log.info("📝 REJECT (LLM commentary): \(wrong) / \(right)")
             return false
         }
-        
-        // Reject if either side contains only common Chinese functional words
-        // (these are grammar edits, not phonetic corrections)
-        let functionalWords = Set(["的", "了", "是", "在", "有", "这", "那", "就", "也", "都", "不", "会", "到", "和"])
-        if functionalWords.contains(wrong) || functionalWords.contains(right) {
-            Log.info("📝 EditTracker: rejected (functional word): \(wrong) / \(right)")
+
+        // Expanded Chinese functional / common word blocklist
+        let blockedTokens: Set<String> = [
+            // Single-char functional words
+            "的", "了", "是", "在", "有", "这", "那", "就", "也", "都",
+            "不", "会", "到", "和", "与", "而", "但", "或", "把", "被",
+            "让", "给", "从", "对", "向", "过", "着", "吗", "呢", "吧",
+            "啊", "哦", "嗯", "哈", "呀", "么", "很", "可", "能", "要",
+            // Common English functional words
+            "the", "a", "an", "is", "am", "are", "was", "were", "be",
+            "to", "of", "in", "on", "at", "for", "and", "or", "but",
+            "it", "he", "she", "we", "they", "my", "your", "his", "her",
+            "this", "that", "with", "from", "not", "so", "if", "do",
+            "i", "me", "you", "us", "them"
+        ]
+        if blockedTokens.contains(wrong) || blockedTokens.contains(right)
+            || blockedTokens.contains(lowerWrong) || blockedTokens.contains(lowerRight) {
+            Log.info("📝 REJECT (blocked functional token): \(wrong) / \(right)")
             return false
         }
-        
+
+        // --- Gate 5: Phonetic similarity ---
+        let similarity = phoneticSimilarity(wrong: wrong, right: right)
+        let threshold: Double = 0.4  // Conservative — must share ≥40% phonetic overlap
+        guard similarity >= threshold else {
+            Log.info("📝 REJECT (phonetic similarity \(String(format: "%.2f", similarity)) < \(threshold)): \(wrong) / \(right)")
+            return false
+        }
+
+        Log.info("📝 ACCEPT (similarity=\(String(format: "%.2f", similarity))): \(wrong) → \(right)")
         return true
+    }
+
+    // MARK: - Phonetic Similarity
+
+    /// Compute phonetic similarity between two strings.
+    /// Chinese: convert to pinyin via CFStringTransform, then compare.
+    /// English: normalize to lowercase alphanumeric, then compare.
+    /// Returns 0.0 (completely different) to 1.0 (identical).
+    private func phoneticSimilarity(wrong: String, right: String) -> Double {
+        let wrongPinyin = toPhoneticKey(wrong)
+        let rightPinyin = toPhoneticKey(right)
+
+        guard !wrongPinyin.isEmpty, !rightPinyin.isEmpty else { return 0.0 }
+
+        let distance = levenshteinDistance(wrongPinyin, rightPinyin)
+        let maxLen = max(wrongPinyin.count, rightPinyin.count)
+        return 1.0 - Double(distance) / Double(maxLen)
+    }
+
+    /// Convert a string to a phonetic key for comparison.
+    /// Chinese characters → pinyin (via Foundation CFStringTransform).
+    /// English/other → lowercase alphanumeric only.
+    private func toPhoneticKey(_ text: String) -> String {
+        let mutable = NSMutableString(string: text)
+
+        // Convert Chinese to Latin (pinyin) — Foundation built-in
+        CFStringTransform(mutable, nil, kCFStringTransformToLatin, false)
+        // Strip diacritics (tone marks)
+        CFStringTransform(mutable, nil, kCFStringTransformStripDiacritics, false)
+
+        // Normalize: lowercase, keep only alphanumeric
+        let normalized = (mutable as String)
+            .lowercased()
+            .unicodeScalars
+            .filter { CharacterSet.alphanumerics.contains($0) }
+            .map { String($0) }
+            .joined()
+
+        return normalized
+    }
+
+    /// Standard Levenshtein edit distance.
+    private func levenshteinDistance(_ s1: String, _ s2: String) -> Int {
+        let a = Array(s1)
+        let b = Array(s2)
+        let m = a.count
+        let n = b.count
+
+        if m == 0 { return n }
+        if n == 0 { return m }
+
+        var prev = Array(0...n)
+        var curr = Array(repeating: 0, count: n + 1)
+
+        for i in 1...m {
+            curr[0] = i
+            for j in 1...n {
+                let cost = a[i - 1] == b[j - 1] ? 0 : 1
+                curr[j] = min(
+                    prev[j] + 1,       // deletion
+                    curr[j - 1] + 1,   // insertion
+                    prev[j - 1] + cost  // substitution
+                )
+            }
+            prev = curr
+        }
+
+        return prev[n]
     }
     
     // MARK: - Logging

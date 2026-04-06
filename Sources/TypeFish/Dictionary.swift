@@ -65,50 +65,73 @@ struct CustomDictionary: Codable {
     }
     
     /// Remove garbage auto-learned replacements.
+    /// Aligned with EditTracker P0 hard-gates: length ratio ≤2.0, abs diff ≤4,
+    /// blocked tokens, LLM commentary, garbled text.
     /// Returns true if any were removed.
     mutating func sanitizeReplacements() -> Bool {
         var removed: [String] = []
-        
+
+        let blockedTokens: Set<String> = [
+            "的", "了", "是", "在", "有", "这", "那", "就", "也", "都",
+            "不", "会", "到", "和", "与", "而", "但", "或", "把", "被",
+            "让", "给", "从", "对", "向", "过", "着", "吗", "呢", "吧",
+            "啊", "哦", "嗯", "哈", "呀", "么", "很", "可", "能", "要",
+            "the", "a", "an", "is", "am", "are", "was", "were", "be",
+            "to", "of", "in", "on", "at", "for", "and", "or", "but",
+            "it", "he", "she", "we", "they", "my", "your", "his", "her",
+            "this", "that", "with", "from", "not", "so", "if", "do",
+            "i", "me", "you", "us", "them"
+        ]
+
         for (wrong, right) in replacements {
             let lowerRight = right.lowercased()
             let lowerWrong = wrong.lowercased()
-            
+
             // Remove if value contains LLM commentary
             if lowerRight.contains("phonetic") || lowerRight.contains("error found")
                 || lowerRight.contains("no correction") || lowerRight.contains("unchanged") {
-                removed.append("\(wrong) → \(right)")
+                removed.append(wrong)
                 continue
             }
-            
+
             // Remove if key contains LLM commentary
             if lowerWrong.contains("phonetic") || lowerWrong.contains("error found") {
-                removed.append("\(wrong) → \(right)")
+                removed.append(wrong)
                 continue
             }
-            
-            // Remove reversed/garbled text (detect by checking if chars are mostly non-ASCII in wrong order)
+
+            // Remove blocked functional tokens
+            if blockedTokens.contains(wrong) || blockedTokens.contains(right)
+                || blockedTokens.contains(lowerWrong) || blockedTokens.contains(lowerRight) {
+                removed.append(wrong)
+                continue
+            }
+
+            // Remove if length ratio > 2.0 or absolute diff > 4
+            let lenRatio = Double(max(wrong.count, right.count)) / Double(max(min(wrong.count, right.count), 1))
+            if lenRatio > 2.0 || abs(wrong.count - right.count) > 4 {
+                removed.append(wrong)
+                continue
+            }
+
+            // Remove reversed/garbled text
             let hasWeirdMix = wrong.unicodeScalars.contains(where: { $0.value > 0x4E00 })
                 && wrong.unicodeScalars.contains(where: { $0.value < 128 && CharacterSet.letters.contains($0) })
                 && wrong.count > 10
             if hasWeirdMix && !right.contains(wrong.prefix(3)) {
-                // Long mixed text that doesn't overlap with replacement — likely garbage
-                let ratio = Double(max(wrong.count, right.count)) / Double(max(min(wrong.count, right.count), 1))
-                if ratio > 3.0 {
-                    removed.append("\(wrong) → \(right)")
-                    continue
-                }
+                removed.append(wrong)
+                continue
             }
         }
-        
+
         if !removed.isEmpty {
-            for entry in removed {
-                let key = String(entry.split(separator: " ")[0])
-                replacements.removeValue(forKey: key)
+            for key in removed {
+                let val = replacements.removeValue(forKey: key) ?? "?"
+                Log.info("   🗑 \(key) → \(val)")
             }
-            Log.info("🧹 Sanitized \(removed.count) garbage dictionary entries:")
-            for r in removed { Log.info("   🗑 \(r)") }
+            Log.info("🧹 Sanitized \(removed.count) garbage dictionary entries")
         }
-        
+
         return !removed.isEmpty
     }
     
