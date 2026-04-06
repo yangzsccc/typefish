@@ -43,7 +43,7 @@ class AppState: ObservableObject {
     
     /// Safety timeout to prevent permanent processing stuck
     private var processingTimeout: Timer?
-    private let maxProcessingTime: TimeInterval = 60
+    private let maxProcessingTime: TimeInterval = 30
     
     /// Custom sounds
     private var startSound: NSSound?
