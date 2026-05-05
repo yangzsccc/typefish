@@ -4,7 +4,7 @@ import AppKit
 /// Checks GitHub Releases for new versions and offers to update.
 struct Updater {
     
-    static let currentVersion = "2.3.0"
+    static let currentVersion = "2.4.0"
     static let repo = "yangzsccc/typefish"
     static let releasesAPI = "https://api.github.com/repos/yangzsccc/typefish/releases/latest"
     
