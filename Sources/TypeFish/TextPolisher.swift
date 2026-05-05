@@ -79,17 +79,11 @@ enum TextPolisher {
         return result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? text : result
     }
     
-    /// Fallback model when primary hits rate limit
-    /// Note: 8b-instant had severe issues with adding commentary like "(no phonetic error found)"
-    /// Note: 70b-specdec was decommissioned by Groq
-    /// Using same 70b model with retry — better to wait than use 8b
-    private static let fallbackModel = "llama-3.3-70b-versatile"
-    
     /// Polish raw transcript text
     static func polish(
         text: String,
         apiKey: String,
-        model: String = "llama-3.3-70b-versatile",
+        model: String = "openai/gpt-oss-120b",
         systemPrompt: String,
         isFallback: Bool = false,
         completion: @escaping (String) -> Void
@@ -118,16 +112,7 @@ enum TextPolisher {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 15
         
-        // Layer 1: Wrap input in XML tags to mark it as DATA, not instruction
-        let userMessage = """
-        <transcription>
-        \(trimmed)
-        </transcription>
-        
-        Clean up the transcription above. Output ONLY the cleaned text, nothing else. Do not add any notes, comments, or annotations in parentheses.
-        """
-        
-        // Layer 2: Few-shot examples showing questions returned as-is
+        // Layer 1: Few-shot examples showing questions returned as-is
         let fewShotSystemPrompt = systemPrompt + """
         
         
@@ -188,19 +173,7 @@ enum TextPolisher {
         Output: 这个是我直接得到的面试的feedback和自己的感悟，但我不知道怎么样能够通过这些感悟convert成一个更好的behavior question preparation doc。
         """
         
-        // Cap max_tokens to prevent long generation
-        // Polish should never produce much more than the input
-        let maxTokens = max(trimmed.count, 200)
-        
-        let payload: [String: Any] = [
-            "model": model,
-            "messages": [
-                ["role": "system", "content": fewShotSystemPrompt],
-                ["role": "user", "content": userMessage]
-            ],
-            "temperature": 0.1,
-            "max_tokens": maxTokens
-        ]
+        let payload = requestPayload(text: trimmed, model: model, systemPrompt: fewShotSystemPrompt)
         
         guard let jsonData = try? JSONSerialization.data(withJSONObject: payload) else {
             completion(trimmed)
@@ -247,78 +220,7 @@ enum TextPolisher {
                let first = choices.first,
                let message = first["message"] as? [String: Any],
                let content = message["content"] as? String {
-                var polished = content.trimmingCharacters(in: .whitespacesAndNewlines)
-                
-                // Strip XML tags if the model echoed them back
-                polished = polished
-                    .replacingOccurrences(of: "<transcription>", with: "")
-                    .replacingOccurrences(of: "</transcription>", with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                
-                // Strip LLM inline commentary that leaks into output
-                // Phase 1: Direct string replacements (most reliable)
-                let directGarbage = [
-                    "(no phonetic error found)",
-                    "(No phonetic error found)",
-                    "(no phonetic errors found)",
-                    "(No phonetic errors found)",
-                    "(no speech error found)",
-                    "(no speech errors found)",
-                    "(no STT error found)",
-                    "(no errors found)",
-                    "(no changes needed)",
-                    "(no changes made)",
-                    "(no change needed)",
-                    "(unchanged)",
-                    "(Unchanged)",
-                    "No phonetic error found",
-                    "No phonetic errors found",
-                    "NoPhoneticErrorFound",
-                    "NoFuneticEraFound",
-                    "(no correction needed)",
-                    "(no corrections needed)",
-                    "(no correction found)",
-                    "(no corrections found)",
-                ]
-                for garbage in directGarbage {
-                    if polished.contains(garbage) {
-                        Log.info("🧹 Stripped LLM commentary: \(garbage)")
-                        polished = polished.replacingOccurrences(of: garbage, with: "")
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                    }
-                }
-                
-                // Phase 2: Regex for patterns we can't enumerate
-                let inlineGarbagePatterns = [
-                    "\\(no \\w+ (?:error|change|correction)s? found\\)",
-                    "\\(Note:.*?\\)",
-                    "\\(注[：:].*?\\)",
-                    "\\[no (?:error|change|correction)s? found\\]",
-                ]
-                for pattern in inlineGarbagePatterns {
-                    if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
-                        let range = NSRange(polished.startIndex..., in: polished)
-                        let cleaned = regex.stringByReplacingMatches(in: polished, range: range, withTemplate: " ")
-                            .replacingOccurrences(of: "  ", with: " ")
-                        let trimCleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if trimCleaned != polished.trimmingCharacters(in: .whitespacesAndNewlines) && !trimCleaned.isEmpty {
-                            Log.info("🧹 Stripped inline LLM commentary matching: \(pattern)")
-                            polished = trimCleaned
-                        }
-                    }
-                }
-                
-                // Layer 3a: Length guard — if output is >1.8x longer, LLM probably added content
-                // (1.8x instead of 1.5x to allow email formatting with line breaks)
-                let ratio = Double(polished.count) / Double(trimmed.count)
-                if ratio > 1.8 {
-                    Log.info("⚠️ Polish output too long (\(polished.count) vs \(trimmed.count) chars, ratio \(String(format: "%.1f", ratio))x) — using raw transcription.")
-                    completion(trimmed)
-                    return
-                }
-                
-                // Layer 3b: Strip trailing LLM commentary lines
-                polished = TextPolisher.stripTrailingGarbage(polished, originalLineCount: trimmed.components(separatedBy: "\n").count)
+                let polished = cleanedModelOutput(content: content, original: trimmed)
                 
                 let modelTag = isFallback ? " [fallback:\(model)]" : ""
                 Log.info("✅ Polished (\(String(format: "%.1f", elapsed))s)\(modelTag): \(polished.prefix(100))...")
@@ -329,5 +231,126 @@ enum TextPolisher {
                 completion(trimmed)
             }
         }.resume()
+    }
+    
+    static func requestPayload(text: String, model: String, systemPrompt: String) -> [String: Any] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let userMessage = """
+        <transcription>
+        \(trimmed)
+        </transcription>
+        
+        Clean up the transcription above. Output ONLY the cleaned text, nothing else. Do not add any notes, comments, or annotations in parentheses.
+        """
+        
+        var payload: [String: Any] = [
+            "model": model,
+            "messages": [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user", "content": userMessage]
+            ],
+            "temperature": 0.1,
+            "max_tokens": maxTokens(for: trimmed, model: model)
+        ]
+        
+        if usesReasoningTokens(model: model) {
+            payload["reasoning_effort"] = "low"
+        }
+        
+        return payload
+    }
+    
+    static func cleanedModelOutput(content: String, original: String) -> String {
+        let trimmed = original.trimmingCharacters(in: .whitespacesAndNewlines)
+        var polished = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        polished = polished
+            .replacingOccurrences(of: "<transcription>", with: "")
+            .replacingOccurrences(of: "</transcription>", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        guard !polished.isEmpty else {
+            Log.info("⚠️ Polish returned empty content — using raw transcription")
+            return trimmed
+        }
+        
+        let directGarbage = [
+            "(no phonetic error found)",
+            "(No phonetic error found)",
+            "(no phonetic errors found)",
+            "(No phonetic errors found)",
+            "(no speech error found)",
+            "(no speech errors found)",
+            "(no STT error found)",
+            "(no errors found)",
+            "(no changes needed)",
+            "(no changes made)",
+            "(no change needed)",
+            "(unchanged)",
+            "(Unchanged)",
+            "No phonetic error found",
+            "No phonetic errors found",
+            "NoPhoneticErrorFound",
+            "NoFuneticEraFound",
+            "(no correction needed)",
+            "(no corrections needed)",
+            "(no correction found)",
+            "(no corrections found)",
+        ]
+        for garbage in directGarbage {
+            if polished.contains(garbage) {
+                Log.info("🧹 Stripped LLM commentary: \(garbage)")
+                polished = polished.replacingOccurrences(of: garbage, with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        
+        let inlineGarbagePatterns = [
+            "\\(no \\w+ (?:error|change|correction)s? found\\)",
+            "\\(Note:.*?\\)",
+            "\\(注[：:].*?\\)",
+            "\\[no (?:error|change|correction)s? found\\]",
+        ]
+        for pattern in inlineGarbagePatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+                let range = NSRange(polished.startIndex..., in: polished)
+                let cleaned = regex.stringByReplacingMatches(in: polished, range: range, withTemplate: " ")
+                    .replacingOccurrences(of: "  ", with: " ")
+                let trimCleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimCleaned != polished.trimmingCharacters(in: .whitespacesAndNewlines) && !trimCleaned.isEmpty {
+                    Log.info("🧹 Stripped inline LLM commentary matching: \(pattern)")
+                    polished = trimCleaned
+                }
+            }
+        }
+        
+        guard !polished.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            Log.info("⚠️ Polish cleanup removed all content — using raw transcription")
+            return trimmed
+        }
+        
+        let ratio = Double(polished.count) / Double(max(trimmed.count, 1))
+        if ratio > 1.8 {
+            Log.info("⚠️ Polish output too long (\(polished.count) vs \(trimmed.count) chars, ratio \(String(format: "%.1f", ratio))x) — using raw transcription.")
+            return trimmed
+        }
+        
+        polished = TextPolisher.stripTrailingGarbage(
+            polished,
+            originalLineCount: trimmed.components(separatedBy: "\n").count
+        )
+        
+        return polished.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? trimmed : polished
+    }
+    
+    private static func maxTokens(for text: String, model: String) -> Int {
+        if usesReasoningTokens(model: model) {
+            return max(512, min(2048, text.count * 2))
+        }
+        return max(text.count, 200)
+    }
+    
+    private static func usesReasoningTokens(model: String) -> Bool {
+        model.hasPrefix("openai/gpt-oss")
     }
 }

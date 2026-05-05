@@ -456,19 +456,25 @@ class AudioRecorder {
         let data = channelData[0]
         let sampleRate = Int(format.sampleRate)
         
-        let chunkSize = sampleRate / 20  // 50ms chunks
+        let chunkSize = max(1, sampleRate / 20)  // 50ms chunks
+        var peakChunkRMS: Float = 0.0
+        
+        var peakScanFrame = 0
+        while peakScanFrame < Int(totalFrames) {
+            let end = min(peakScanFrame + chunkSize, Int(totalFrames))
+            let rms = chunkRMS(data: data, start: peakScanFrame, end: end)
+            peakChunkRMS = max(peakChunkRMS, rms)
+            peakScanFrame += chunkSize
+        }
+        
+        let adaptiveThreshold = min(threshold, max(0.0015, peakChunkRMS * 0.10))
         var lastSpeechFrame = Int(totalFrames)
         
         var i = Int(totalFrames) - chunkSize
         while i >= 0 {
-            var sum: Float = 0
             let end = min(i + chunkSize, Int(totalFrames))
-            for j in i..<end {
-                let s = data[j]
-                sum += s * s
-            }
-            let rms = sqrtf(sum / Float(end - i))
-            if rms > threshold {
+            let rms = chunkRMS(data: data, start: i, end: end)
+            if rms > adaptiveThreshold {
                 lastSpeechFrame = end
                 break
             }
@@ -482,7 +488,7 @@ class AudioRecorder {
         guard removedFrames > sampleRate else { return nil }
         
         let removedMs = removedFrames * 1000 / sampleRate
-        Log.info("✂️ Trimmed \(removedMs)ms trailing silence")
+        Log.info("✂️ Trimmed \(removedMs)ms trailing silence (threshold \(String(format: "%.4f", adaptiveThreshold)))")
         
         let trimmedURL = fileURL.deletingLastPathComponent()
             .appendingPathComponent("trimmed_\(fileURL.lastPathComponent)")
@@ -499,6 +505,17 @@ class AudioRecorder {
             Log.info("⚠️ Failed to write trimmed audio: \(error)")
             return nil
         }
+    }
+    
+    private static func chunkRMS(data: UnsafeMutablePointer<Float>, start: Int, end: Int) -> Float {
+        guard end > start else { return 0 }
+        
+        var sum: Float = 0
+        for j in start..<end {
+            let s = data[j]
+            sum += s * s
+        }
+        return sqrtf(sum / Float(end - start))
     }
     
     // MARK: - Device Management

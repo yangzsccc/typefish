@@ -24,6 +24,7 @@ enum TranscriptionLogger {
     /// Log a transcription result and preserve the audio file
     static func log(
         audioURL: URL,
+        uploadURL: URL? = nil,
         whisperRaw: String,
         polished: String,
         mode: String,  // "transcribe" or "translate"
@@ -39,10 +40,21 @@ enum TranscriptionLogger {
         let savedAudioURL = audioDir.appendingPathComponent(audioFilename)
         try? FileManager.default.copyItem(at: audioURL, to: savedAudioURL)
         
+        var uploadFilename = ""
+        if let uploadURL {
+            uploadFilename = uploadURL.lastPathComponent
+            if uploadURL != audioURL {
+                let savedUploadURL = audioDir.appendingPathComponent(uploadFilename)
+                try? FileManager.default.removeItem(at: savedUploadURL)
+                try? FileManager.default.copyItem(at: uploadURL, to: savedUploadURL)
+            }
+        }
+        
         // Build log entry
         let entry: [String: Any] = [
             "timestamp": timestamp,
             "audio_file": audioFilename,
+            "upload_file": uploadFilename,
             "whisper_raw": whisperRaw,
             "polished": polished,
             "mode": mode,

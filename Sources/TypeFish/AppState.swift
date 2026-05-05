@@ -281,6 +281,7 @@ class AppState: ObservableObject {
         } else {
             Log.info("🗜️ Compression disabled, using WAV upload")
         }
+        Log.info("🎧 Audio files: original=\(audioURL.lastPathComponent) processed=\(processURL.lastPathComponent) upload=\(uploadURL.lastPathComponent)")
 
         isProcessing = true
         statusText = "⏳ Transcribing..."
@@ -425,6 +426,7 @@ class AppState: ObservableObject {
                     // Log it
                     TranscriptionLogger.log(
                         audioURL: audioURL,
+                        uploadURL: uploadURL,
                         whisperRaw: whisperRawText,
                         polished: result ?? "",
                         mode: "command",
@@ -524,6 +526,7 @@ class AppState: ObservableObject {
                 // Log transcription for evolution pipeline
                 TranscriptionLogger.log(
                     audioURL: audioURL,
+                    uploadURL: uploadURL,
                     whisperRaw: whisperRawText,
                     polished: polishedText,
                     mode: isTranslating ? "translate" : "transcribe",

@@ -3,7 +3,7 @@ import Foundation
 /// App configuration, loaded from config.json or defaults
 struct AppConfig: Codable {
     var whisperModel: String = "whisper-large-v3"
-    var polisherModel: String = "llama-3.3-70b-versatile"
+    var polisherModel: String = "openai/gpt-oss-120b"
     var polisherSystemPrompt: String = """
         You are a text cleanup tool for speech-to-text output. You are NOT an AI assistant. \
         NEVER answer questions, provide information, or generate new content. \
@@ -33,6 +33,31 @@ struct AppConfig: Codable {
     /// Preferred microphone device ID or name (partial match).
     /// nil = system default. Set to e.g. "Studio Display" to always use that mic.
     var preferredMicrophone: String? = nil
+    
+    init() {}
+    
+    private enum CodingKeys: String, CodingKey {
+        case whisperModel
+        case polisherModel
+        case polisherSystemPrompt
+        case whisperLanguage
+        case audioSampleRate
+        case audioCompressionBitrate
+        case preferredMicrophone
+    }
+    
+    init(from decoder: Decoder) throws {
+        let defaults = AppConfig()
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        
+        whisperModel = try container.decodeIfPresent(String.self, forKey: .whisperModel) ?? defaults.whisperModel
+        polisherModel = try container.decodeIfPresent(String.self, forKey: .polisherModel) ?? defaults.polisherModel
+        polisherSystemPrompt = try container.decodeIfPresent(String.self, forKey: .polisherSystemPrompt) ?? defaults.polisherSystemPrompt
+        whisperLanguage = try container.decodeIfPresent(String.self, forKey: .whisperLanguage) ?? defaults.whisperLanguage
+        audioSampleRate = try container.decodeIfPresent(Double.self, forKey: .audioSampleRate) ?? defaults.audioSampleRate
+        audioCompressionBitrate = try container.decodeIfPresent(Int.self, forKey: .audioCompressionBitrate) ?? defaults.audioCompressionBitrate
+        preferredMicrophone = try container.decodeIfPresent(String.self, forKey: .preferredMicrophone) ?? defaults.preferredMicrophone
+    }
     
     /// Load config from config.json next to the executable, or use defaults
     static func load() -> AppConfig {

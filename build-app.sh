@@ -9,6 +9,8 @@ VERSION="$(grep 'currentVersion' Sources/TypeFish/Updater.swift | head -1 | sed 
 # Build release
 swift build -c release 2>&1 | tail -3
 
+VERSION="$(grep 'currentVersion' Sources/TypeFish/Updater.swift | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+
 # Create .app bundle
 APP_DIR="TypeFish.app/Contents/MacOS"
 mkdir -p "$APP_DIR"
