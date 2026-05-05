@@ -4,7 +4,7 @@ import AppKit
 /// Main app state and pipeline orchestrator.
 /// Manages: recording toggle, transcription, polishing, pasting.
 class AppState: ObservableObject {
-    
+
     @Published var isRecording = false
     @Published var isProcessing = false {
         didSet {
@@ -15,47 +15,47 @@ class AppState: ObservableObject {
         }
     }
     @Published var statusText = "Ready"
-    
+
     /// When true, current recording will be translated to English
     private(set) var translateMode = false
-    
+
     /// When true, current recording is AI command mode (generate/edit)
     private(set) var commandMode = false
-    
+
     /// Selected text captured when command mode started
     private var commandSelectedText: String?
-    
+
     /// Public accessor for menu bar icon
     var isTranslateMode: Bool { translateMode }
-    
+
     /// Public accessor for command mode
     var isCommandMode: Bool { commandMode }
-    
+
     var config: AppConfig
     let recorder: AudioRecorder
     let groqAPIKey: String?
-    
+
     /// Custom dictionary for vocabulary hints and replacements
     var dictionary: CustomDictionary
-    
+
     /// File monitor for auto-reloading dictionary
     private var dictFileMonitor: DispatchSourceFileSystemObject?
-    
+
     /// Safety timeout to prevent permanent processing stuck
     private var processingTimeout: Timer?
     private let maxProcessingTime: TimeInterval = 30
-    
+
     /// Custom sounds
     private var startSound: NSSound?
     private var stopSound: NSSound?
     var cancelSound: NSSound?
-    
+
     /// Floating overlay indicator
     let overlay = OverlayPanel()
-    
+
     /// Callback to update menu bar icon
     var onStateChange: (() -> Void)?
-    
+
     init() {
         self.config = AppConfig.load()
         self.recorder = AudioRecorder()
@@ -65,26 +65,26 @@ class AppState: ObservableObject {
         self.recorder.lockPreferredMicrophone()
         self.groqAPIKey = AppState.loadAPIKey()
         self.dictionary = CustomDictionary.load()
-        
+
         // Load custom sounds
         self.startSound = AppState.loadSound("start")
         self.stopSound = AppState.loadSound("stop")
         self.cancelSound = AppState.loadSound("cancel")
-        
+
         if groqAPIKey != nil {
             Log.info("✅ Groq API key loaded")
         } else {
             Log.info("❌ No Groq API key found! Set GROQ_API_KEY env var or create ~/.config/typefish/groq_key")
         }
-        
+
         watchDictionaryFile()
-        
+
         // Start audio engine in background — keeps running so recording is instant
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.recorder.startEngine()
         }
     }
-    
+
     /// Toggle recording on/off (normal transcribe)
     func toggleRecording() {
         if isRecording {
@@ -96,7 +96,7 @@ class AppState: ObservableObject {
             startRecording()
         }
     }
-    
+
     /// Toggle recording in translate-to-English mode
     func toggleTranslateRecording() {
         if isRecording {
@@ -107,7 +107,7 @@ class AppState: ObservableObject {
             startRecording()
         }
     }
-    
+
     /// Toggle recording in AI command mode (generate/edit content)
     func toggleCommandRecording() {
         if isRecording {
@@ -115,46 +115,46 @@ class AppState: ObservableObject {
         } else {
             translateMode = false
             commandMode = true
-            
+
             // Capture selected text NOW before recording starts
             // Save frontmost app first
             PasteService.saveFrontmostApp()
-            
+
             // Try AX API first, then clipboard simulation
             commandSelectedText = ContextReader.readSelectedText()
             if commandSelectedText == nil {
                 commandSelectedText = ContextReader.readSelectedTextViaClipboard()
             }
-            
+
             if let sel = commandSelectedText {
                 Log.info("🤖 AI Command: captured \(sel.count) chars of selected text")
             } else {
                 Log.info("🤖 AI Command: no text selected (will generate from scratch)")
             }
-            
+
             startRecording()
         }
     }
-    
+
     /// Cancel current recording without processing
     func cancelRecording() {
         guard isRecording else { return }
-        
+
         Log.info("🚫 Recording cancelled by user")
-        
+
         // Stop the recorder immediately, discard the file
         if let audioURL = recorder.stopRecording() {
             cleanup(audioURL)
         }
-        
+
         isRecording = false
         isProcessing = false
         statusText = "❌ Cancelled"
         onStateChange?()
-        
+
         cancelSound?.play()
         overlay.dismiss()
-        
+
         // Reset status after 1.5 seconds
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             guard let self = self else { return }
@@ -164,9 +164,9 @@ class AppState: ObservableObject {
             }
         }
     }
-    
+
     // MARK: - Recording
-    
+
     private func startRecording() {
         if isProcessing {
             // If processing has been stuck for >10s, force-reset on hotkey press
@@ -180,13 +180,13 @@ class AppState: ObservableObject {
                 return
             }
         }
-        
+
         // Stop any edit tracking from previous recording
         EditTracker.shared.stopTracking()
-        
+
         // Save reference to the app user is typing in BEFORE we do anything
         PasteService.saveFrontmostApp()
-        
+
         // Show UI IMMEDIATELY — don't wait for engine startup
         isRecording = true
         if commandMode {
@@ -203,12 +203,12 @@ class AppState: ObservableObject {
         } else {
             overlay.showRecording(translate: translateMode)
         }
-        
+
         // Wire up audio level to overlay
         recorder.onAudioLevel = { [weak self] rms in
             self?.overlay.updateAudioLevel(rms)
         }
-        
+
         // Start recording — instant because engine is already running
         // Just creates a file for the tap to write to
         let success = recorder.startRecording()
@@ -220,7 +220,7 @@ class AppState: ObservableObject {
             overlay.dismiss()
         }
     }
-    
+
     private func stopAndProcess() {
         // Update UI immediately on stop press
         isRecording = false
@@ -228,7 +228,7 @@ class AppState: ObservableObject {
         statusText = "⏳ Processing..."
         onStateChange?()
         overlay.showProcessing()
-        
+
         // Brief delay after pressing stop to capture trailing speech
         Log.info("⏱️ Recording tail buffer (400ms)...")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
@@ -239,7 +239,7 @@ class AppState: ObservableObject {
             self.finalizeRecording()
         }
     }
-    
+
     private func finalizeRecording() {
         guard let audioURL = recorder.stopRecording() else {
             Log.info("⚠️ No audio file from recording")
@@ -247,7 +247,7 @@ class AppState: ObservableObject {
             onStateChange?()
             return
         }
-        
+
         // Check if audio was silence (prevent Whisper hallucination)
         if recorder.wasSilent() {
             statusText = "🔇 No speech"
@@ -262,7 +262,7 @@ class AppState: ObservableObject {
             }
             return
         }
-        
+
         // Trim trailing silence to prevent Whisper hallucination
         let processURL: URL
         if let trimmedURL = AudioRecorder.trimTrailingSilence(fileURL: audioURL) {
@@ -270,7 +270,7 @@ class AppState: ObservableObject {
         } else {
             processURL = audioURL
         }
-        
+
         // Compress audio for faster upload (WAV → M4A), configurable bitrate
         var uploadURL = processURL
         let bitrate = max(0, config.audioCompressionBitrate)
@@ -281,13 +281,13 @@ class AppState: ObservableObject {
         } else {
             Log.info("🗜️ Compression disabled, using WAV upload")
         }
-        
+
         isProcessing = true
         statusText = "⏳ Transcribing..."
         onStateChange?()
-        
+
         overlay.showProcessing()
-        
+
         // Safety: force-reset after 60s to prevent permanent stuck
         processingTimeout?.invalidate()
         processingTimeout = Timer.scheduledTimer(withTimeInterval: maxProcessingTime, repeats: false) { [weak self] _ in
@@ -304,7 +304,7 @@ class AppState: ObservableObject {
                 }
             }
         }
-        
+
         guard let apiKey = groqAPIKey else {
             Log.info("❌ No API key, cannot transcribe")
             isProcessing = false
@@ -313,14 +313,14 @@ class AppState: ObservableObject {
             cleanup(audioURL)
             return
         }
-        
+
         // Read context from current text field (before transcription starts)
         let fieldContext = ContextReader.readContext()
-        
+
         // Capture mode flags before they get reset
         let isCommandMode = self.commandMode
         let capturedSelectedText = self.commandSelectedText
-        
+
         // Metrics tracking
         let pipelineStartTime = CFAbsoluteTimeGetCurrent()
         var metrics = MetricsLogger.PipelineMetrics()
@@ -328,14 +328,14 @@ class AppState: ObservableObject {
         metrics.audioSizeKB = (try? FileManager.default.attributesOfItem(atPath: processURL.path)[.size] as? Int).flatMap { $0 / 1024 } ?? 0
         metrics.whisperModel = self.config.whisperModel
         metrics.polishModel = self.config.polisherModel
-        
+
         // Pipeline: Transcribe/Translate → Polish → Paste (or AI Command)
         let vocabPrompt = dictionary.whisperPrompt()
         let isTranslating = self.translateMode
-        
+
         let whisperCallback: (String) -> Void = { [weak self] rawText in
             guard let self = self else { return }
-            
+
             guard !rawText.isEmpty else {
                 metrics.success = false
                 metrics.errorType = "no_speech"
@@ -351,7 +351,7 @@ class AppState: ObservableObject {
                 if processURL != audioURL { self.cleanup(processURL) }; if uploadURL != processURL { self.cleanup(uploadURL) }
                 return
             }
-            
+
             // Check for known Whisper hallucinations
             if TextPolisher.isHallucination(rawText) {
                 Log.info("🔇 Whisper hallucination detected: \(rawText.prefix(50))...")
@@ -365,19 +365,19 @@ class AppState: ObservableObject {
                 if processURL != audioURL { self.cleanup(processURL) }; if uploadURL != processURL { self.cleanup(uploadURL) }
                 return
             }
-            
+
             // Save raw text for logging
             let whisperRawText = rawText
-            
+
             // Apply dictionary replacements
             let correctedText = self.dictionary.applyReplacements(rawText)
-            
+
             // === AI Command Mode: branch here ===
             if isCommandMode {
                 DispatchQueue.main.async {
                     self.statusText = "🤖 AI generating..."
                     self.onStateChange?()
-                    
+
                     // Show command instruction overlay so user can see what was recognized
                     self.overlay.showCommandConfirmation(instruction: correctedText) {
                         // Undo callback: Cmd+Z to revert the paste
@@ -385,7 +385,7 @@ class AppState: ObservableObject {
                         PasteService.undo()
                     }
                 }
-                
+
                 AICommand.process(
                     instruction: correctedText,
                     selectedText: capturedSelectedText,
@@ -400,20 +400,20 @@ class AppState: ObservableObject {
                             self.overlay.dismissCommandWindow()
                             return
                         }
-                        
+
                         // Paste the generated content
                         let pasted = PasteService.paste(generated)
-                        
+
                         self.isProcessing = false
                         self.statusText = "✅ Done"
                         self.onStateChange?()
-                        
+
                         if !pasted {
                             self.overlay.dismissCommandWindow()
                             self.overlay.showResult(generated)
                         }
                         // Command notification stays visible with Undo button
-                        
+
                         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                             if !self.isRecording && !self.isProcessing {
                                 self.statusText = "Ready"
@@ -421,7 +421,7 @@ class AppState: ObservableObject {
                             }
                         }
                     }
-                    
+
                     // Log it
                     TranscriptionLogger.log(
                         audioURL: audioURL,
@@ -432,18 +432,18 @@ class AppState: ObservableObject {
                         polisherModel: "llama-3.3-70b-versatile",
                         fieldContext: fieldContext
                     )
-                    
+
                     self.cleanup(audioURL)
                     if processURL != audioURL { self.cleanup(processURL) }; if uploadURL != processURL { self.cleanup(uploadURL) }
                 }
                 return  // Don't fall through to normal polish pipeline
             }
-            
+
             DispatchQueue.main.async {
                 self.statusText = "✨ Polishing..."
                 self.onStateChange?()
             }
-            
+
             // Build polisher prompt with dictionary reference + field context + app tone
             var fullSystemPrompt = self.config.polisherSystemPrompt
             if let ref = self.dictionary.polisherReference() {
@@ -459,7 +459,7 @@ class AppState: ObservableObject {
             if let ctx = fieldContext, !ctx.isEmpty {
                 fullSystemPrompt += "\n\nThe user is typing into a text field that already contains the following text (before the cursor). Use this context to make the new transcription flow naturally — match the tone, avoid repeating what's already written, and connect smoothly:\n<existing_text>\n\(ctx)\n</existing_text>"
             }
-            
+
             // Polish the transcript
             TextPolisher.polish(
                 text: correctedText,
@@ -471,7 +471,7 @@ class AppState: ObservableObject {
                     // Apply reverse replacements AFTER polishing
                     // Catches cases where polisher translates English to Chinese
                     let finalText = self.dictionary.applyReplacements(polishedText)
-                    
+
                     // Safety: don't paste empty text
                     guard !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                         Log.info("⚠️ Polished text was empty, skipping paste")
@@ -481,24 +481,24 @@ class AppState: ObservableObject {
                         self.overlay.dismiss()
                         return
                     }
-                    
+
                     // Try to paste to cursor
                     let pasted = PasteService.paste(finalText)
-                    
+
                     // Record successful transcription for style learning
                     StyleLearner.shared.recordSuccess(
                         raw: whisperRawText,
                         polished: finalText,
                         appName: PasteService.savedApp?.localizedName ?? "unknown"
                     )
-                    
+
                     self.isProcessing = false
                     self.statusText = "✅ Done"
                     self.onStateChange?()
-                    
+
                     if pasted {
                         self.overlay.showDone()
-                        
+
                         // Start edit tracking for auto-dictionary learning
                         if let key = self.groqAPIKey {
                             EditTracker.shared.startTracking(
@@ -511,7 +511,7 @@ class AppState: ObservableObject {
                         // No text input focused — show result panel with copy button
                         self.overlay.showResult(finalText)
                     }
-                    
+
                     // Reset status after 2 seconds
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                         if !self.isRecording && !self.isProcessing {
@@ -520,7 +520,7 @@ class AppState: ObservableObject {
                         }
                     }
                 }
-                
+
                 // Log transcription for evolution pipeline
                 TranscriptionLogger.log(
                     audioURL: audioURL,
@@ -531,12 +531,12 @@ class AppState: ObservableObject {
                     polisherModel: self.config.polisherModel,
                     fieldContext: fieldContext
                 )
-                
+
                 self.cleanup(audioURL)
                 if processURL != audioURL { self.cleanup(processURL) }; if uploadURL != processURL { self.cleanup(uploadURL) }
             }
         }
-        
+
         // Call the appropriate Whisper endpoint (use compressed file if available)
         if isTranslating {
             Log.info("🌐 Translate mode: will translate to English")
@@ -545,13 +545,99 @@ class AppState: ObservableObject {
             WhisperAPI.transcribe(fileURL: uploadURL, apiKey: apiKey, model: config.whisperModel, language: config.whisperLanguage, prompt: vocabPrompt, completion: whisperCallback)
         }
     }
-    
+
     private func cleanup(_ url: URL) {
         try? FileManager.default.removeItem(at: url)
     }
-    
+
+    // MARK: - Shared Settings & Dictionary Actions
+
+    func saveConfig() {
+        let configURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/typefish/config.json")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? encoder.encode(config) {
+            try? data.write(to: configURL)
+        }
+    }
+
+    func reloadDictionary() {
+        dictionary = CustomDictionary.load()
+        onStateChange?()
+    }
+
+    func setPreferredMicrophone(_ microphone: String?) {
+        config.preferredMicrophone = microphone
+        saveConfig()
+        recorder.preferredMicrophone = microphone
+        onStateChange?()
+    }
+
+    func setAudioCompressionBitrate(_ bitrate: Int) {
+        config.audioCompressionBitrate = bitrate
+        saveConfig()
+        onStateChange?()
+    }
+
+    static func compressionTitle(for bitrate: Int) -> String {
+        switch bitrate {
+        case 0: return "Off (WAV)"
+        case 32000: return "Aggressive (32kbps)"
+        case 48000: return "Fast (48kbps)"
+        case 64000: return "Balanced (64kbps)"
+        case 96000: return "Quality (96kbps)"
+        default: return "Custom (\(bitrate / 1000)kbps)"
+        }
+    }
+
+    func addDictionaryHint(_ word: String) {
+        dictionary.addHint(word)
+        onStateChange?()
+    }
+
+    func updateDictionaryHint(oldValue: String, newValue: String) {
+        dictionary.updateHint(oldValue: oldValue, newValue: newValue)
+        onStateChange?()
+    }
+
+    func removeDictionaryHint(_ word: String) {
+        dictionary.removeHint(word)
+        onStateChange?()
+    }
+
+    func addDictionaryVocabulary(_ word: String) {
+        dictionary.addVocabulary(word)
+        onStateChange?()
+    }
+
+    func updateDictionaryVocabulary(oldValue: String, newValue: String) {
+        dictionary.updateVocabulary(oldValue: oldValue, newValue: newValue)
+        onStateChange?()
+    }
+
+    func removeDictionaryVocabulary(_ word: String) {
+        dictionary.removeVocabulary(word)
+        onStateChange?()
+    }
+
+    func addDictionaryReplacement(wrong: String, right: String, source: ReplacementSource = .manual) {
+        dictionary.addReplacement(wrong: wrong, right: right, source: source)
+        onStateChange?()
+    }
+
+    func updateDictionaryReplacement(oldWrong: String, wrong: String, right: String, source: ReplacementSource? = nil) {
+        dictionary.updateReplacement(oldWrong: oldWrong, wrong: wrong, right: right, source: source)
+        onStateChange?()
+    }
+
+    func removeDictionaryReplacement(_ wrong: String) {
+        dictionary.removeReplacement(wrong)
+        onStateChange?()
+    }
+
     // MARK: - Dictionary File Watching
-    
+
     private func watchDictionaryFile() {
         let path = CustomDictionary.fileURL.path
         let fd = open(path, O_EVTONLY)
@@ -559,31 +645,31 @@ class AppState: ObservableObject {
             Log.info("⚠️ Cannot watch dictionary file")
             return
         }
-        
+
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd,
             eventMask: [.write, .rename, .delete],
             queue: .main
         )
-        
+
         source.setEventHandler { [weak self] in
             // Small delay to let file writes complete
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 self?.dictionary = CustomDictionary.load()
             }
         }
-        
+
         source.setCancelHandler {
             close(fd)
         }
-        
+
         source.resume()
         self.dictFileMonitor = source
         Log.info("👁️ Watching dictionary file for changes")
     }
-    
+
     // MARK: - Sound Loading
-    
+
     /// Load a custom sound file from the app bundle Resources or fallback locations
     private static func loadSound(_ name: String) -> NSSound? {
         let paths = [
@@ -597,7 +683,7 @@ class AppState: ObservableObject {
             FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("typefish/Sources/TypeFish/Sounds/\(name).aiff").path
         ]
-        
+
         for path in paths {
             if FileManager.default.fileExists(atPath: path) {
                 if let sound = NSSound(contentsOfFile: path, byReference: true) {
@@ -606,13 +692,13 @@ class AppState: ObservableObject {
                 }
             }
         }
-        
+
         Log.info("⚠️ Sound not found: \(name), using system fallback")
         return NSSound(named: name == "start" ? "Tink" : "Pop")
     }
-    
+
     // MARK: - API Key Loading
-    
+
     /// Load Groq API key from env or file
     private static func loadAPIKey() -> String? {
         // 1. Environment variable
@@ -621,7 +707,7 @@ class AppState: ObservableObject {
             Log.info("🔑 API key from env GROQ_API_KEY")
             return key
         }
-        
+
         // 2. TypeFish config file
         let typefishKeyPath = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".config/typefish/groq_key")
@@ -629,7 +715,7 @@ class AppState: ObservableObject {
             Log.info("🔑 API key from ~/.config/typefish/groq_key")
             return key
         }
-        
+
         // 3. Shared with NoClue
         let noclueKeyPath = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".config/noclue/groq_key")
@@ -637,10 +723,10 @@ class AppState: ObservableObject {
             Log.info("🔑 API key from ~/.config/noclue/groq_key (shared)")
             return key
         }
-        
+
         return nil
     }
-    
+
     private static func readKeyFile(_ url: URL) -> String? {
         guard let content = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         // Handle formats: raw key, KEY="value", KEY=value
@@ -650,7 +736,7 @@ class AppState: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
             ?? content.trimmingCharacters(in: .whitespacesAndNewlines)
-        
+
         return cleaned.isEmpty ? nil : cleaned
     }
 }

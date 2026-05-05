@@ -14,87 +14,99 @@ import AppKit
 /// 4. LLM identifies phonetic/speech-recognition corrections
 /// 5. Auto-adds corrections to dictionary (replacements + hints)
 class EditTracker {
-    
+
     static let shared = EditTracker()
-    
+
     private let trackingDuration: TimeInterval = 15
     private let debounceDelay: TimeInterval = 0.3  // 300ms after keypress before reading
-    
+
     private var trackedText: String?
     private var trackingStartTime: Date?
     private var apiKey: String?
     private weak var appState: AppState?
-    
+
     /// Debounce: wait for text to stabilize before analyzing
     private var lastChangeTime: Date?
     private var lastFieldContent: String?
     private let stabilizeDelay: TimeInterval = 3  // seconds of no changes before analyzing
-    
+
     /// Prevent tracking during certain states
     private var isAnalyzing = false
     private var keypressLogCount = 0
     private var cannotReadLogCount = 0
-    
+
     /// Debounce work item for keypress handling
     private var debounceWorkItem: DispatchWorkItem?
-    
+
     /// Timeout work item for 15s tracking window
     private var timeoutWorkItem: DispatchWorkItem?
-    
+
     /// Clipboard fallback for Electron apps
     private static var lastPastedText: String?
     private static var lastPasteTime: Date?
-    
+
     private init() {}
-    
+
+    static func computeDiffForTesting(original: String, edited: String) -> [(removed: String, inserted: String)] {
+        shared.computeDiff(original: original, edited: edited)
+    }
+
+    static func hasSignificantOverlapForTesting(_ original: String, _ edited: String) -> Bool {
+        shared.hasSignificantOverlap(original, edited)
+    }
+
+    static func parseCorrectionsForTesting(_ text: String, sourceText: String, editedText: String) -> [(String, String)] {
+        shared.parseCorrections(text, sourceText: sourceText, editedText: editedText)
+    }
+
     // MARK: - Public API
-    
+
     /// Start tracking after a successful paste.
     /// Call this from AppState after PasteService.paste() returns true.
     func startTracking(pastedText: String, apiKey: String, appState: AppState) {
         // Don't start if already tracking or analyzing
         guard !isAnalyzing else { return }
-        
+
         // Check clipboard fallback: if AX failed last time, check clipboard for edits
         checkClipboardFallback(apiKey: apiKey, appState: appState)
-        
+
         stopTracking()
-        
+
         // Skip very short text (not worth tracking)
         guard pastedText.count >= 4 else { return }
-        
+
         // Save tracking state
         self.trackedText = pastedText
         self.apiKey = apiKey
         self.appState = appState
         self.trackingStartTime = Date()
-        
+
         // Save for clipboard fallback
         EditTracker.lastPastedText = pastedText
         EditTracker.lastPasteTime = Date()
-        
+
         // Enable keyboard event tracking
         HotkeyManager.shared?.isTrackingEdits = true
-        
+
         // Wire up keyboard callbacks
         HotkeyManager.shared?.onAnyKeyPress = { [weak self] in
             self?.handleKeyPress()
         }
-        
+
         HotkeyManager.shared?.onEnterKey = { [weak self] in
             self?.handleEnterKey()
         }
-        
+
         // Set up 15s timeout
         let timeoutItem = DispatchWorkItem { [weak self] in
             self?.handleTimeout()
         }
         self.timeoutWorkItem = timeoutItem
         DispatchQueue.main.asyncAfter(deadline: .now() + trackingDuration, execute: timeoutItem)
-        
+
         Log.info("📝 EditTracker: started keyboard-driven tracking for \(pastedText.count) chars")
     }
-    
+
     /// Check clipboard for edits (fallback for Electron apps where AX fails)
     private func checkClipboardFallback(apiKey: String, appState: AppState) {
         guard let lastPasted = EditTracker.lastPastedText,
@@ -102,13 +114,18 @@ class EditTracker {
               Date().timeIntervalSince(lastTime) < 60 else {  // Only check within 60s
             return
         }
-        
+
         guard let clipboardContent = NSPasteboard.general.string(forType: .string),
               !clipboardContent.isEmpty,
               clipboardContent != lastPasted else {
             return
         }
-        
+
+        guard hasSignificantOverlap(lastPasted, clipboardContent) else {
+            Log.info("📝 EditTracker: clipboard fallback ignored unrelated clipboard text")
+            return
+        }
+
         // Check if clipboard differs by small edit
         let diff = computeDiff(original: lastPasted, edited: clipboardContent)
         if !diff.isEmpty && !isLargeModification(original: lastPasted, edited: clipboardContent) {
@@ -116,7 +133,7 @@ class EditTracker {
             analyzeEdit(pastedText: lastPasted, editedFieldContent: clipboardContent, apiKey: apiKey, appState: appState)
         }
     }
-    
+
     /// Stop tracking (called on timeout, new recording, or edit detected)
     func stopTracking() {
         // Cancel pending work items
@@ -124,7 +141,7 @@ class EditTracker {
         debounceWorkItem = nil
         timeoutWorkItem?.cancel()
         timeoutWorkItem = nil
-        
+
         // Clear state
         trackedText = nil
         trackingStartTime = nil
@@ -132,7 +149,7 @@ class EditTracker {
         appState = nil
         lastChangeTime = nil
         lastFieldContent = nil
-        
+
         // Log summary of suppressed messages
         if cannotReadLogCount > 1 {
             Log.info("📝 EditTracker: 'cannot read field content' occurred \(cannotReadLogCount) times total")
@@ -142,20 +159,20 @@ class EditTracker {
         }
         keypressLogCount = 0
         cannotReadLogCount = 0
-        
+
         // Disable keyboard tracking
         HotkeyManager.shared?.isTrackingEdits = false
         HotkeyManager.shared?.onAnyKeyPress = nil
         HotkeyManager.shared?.onEnterKey = nil
     }
-    
+
     // MARK: - Keyboard Event Handlers
-    
+
     /// Called on every keypress while tracking is active
     private func handleKeyPress() {
         // Cancel any pending debounce
         debounceWorkItem?.cancel()
-        
+
         // Reset the 15s timeout (each keypress extends the window)
         timeoutWorkItem?.cancel()
         let timeoutItem = DispatchWorkItem { [weak self] in
@@ -163,32 +180,32 @@ class EditTracker {
         }
         self.timeoutWorkItem = timeoutItem
         DispatchQueue.main.asyncAfter(deadline: .now() + trackingDuration, execute: timeoutItem)
-        
+
         // Schedule debounced text reading
         let workItem = DispatchWorkItem { [weak self] in
             self?.readAndCheckForEdits()
         }
         debounceWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + debounceDelay, execute: workItem)
-        
+
         // Only log first keypress to reduce noise (hundreds of these in Discord)
         if keypressLogCount == 0 {
             Log.info("📝 EditTracker: keypress detected, waiting \(Int(debounceDelay * 1000))ms...")
         }
         keypressLogCount += 1
     }
-    
+
     /// Called when Enter key is pressed — trigger immediate analysis
     private func handleEnterKey() {
         Log.info("📝 EditTracker: Enter key pressed, triggering immediate analysis (after \(keypressLogCount) keypresses)")
         debounceWorkItem?.cancel()
         readAndCheckForEdits(immediate: true)
     }
-    
+
     /// Called when 15s timeout expires
     private func handleTimeout() {
         guard let tracked = trackedText else { return }
-        
+
         // If there's a pending stable edit, analyze it
         if let lastContent = lastFieldContent, lastChangeTime != nil {
             Log.info("📝 EditTracker: timeout with pending edit, analyzing")
@@ -198,14 +215,14 @@ class EditTracker {
             stopTracking()
         }
     }
-    
+
     /// Read current text and check for edits
     private func readAndCheckForEdits(immediate: Bool = false) {
         guard let tracked = trackedText else {
             stopTracking()
             return
         }
-        
+
         // Try cursor-aware reading first
         var currentContent: String
         if let inputState = ContextReader.readInputState() {
@@ -222,38 +239,38 @@ class EditTracker {
             }
             return
         }
-        
+
         // Field cleared
         guard !currentContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             Log.info("📝 EditTracker: field cleared, stopping")
             stopTracking()
             return
         }
-        
+
         // Check for large modifications using character-level diff
         if isLargeModification(original: tracked, edited: currentContent) {
             Log.info("📝 EditTracker: large modification detected (orig=\(tracked.count) edit=\(currentContent.count)), stopping")
             stopTracking()
             return
         }
-        
+
         // If pasted text still present verbatim, no edit yet
         if currentContent.contains(tracked) {
             lastChangeTime = nil
             lastFieldContent = nil
             return
         }
-        
+
         // Text has changed!
         let now = Date()
-        
+
         // If immediate analysis (Enter key), skip stability check
         if immediate {
             Log.info("📝 EditTracker: immediate analysis triggered")
             triggerAnalysis(pastedText: tracked, editedField: currentContent)
             return
         }
-        
+
         // If content changed since last check, reset stability timer
         if lastFieldContent != currentContent {
             if lastFieldContent == nil {
@@ -263,22 +280,22 @@ class EditTracker {
             lastFieldContent = currentContent
             return
         }
-        
+
         // Content same as last check — verify stability
         guard let changeTime = lastChangeTime else { return }
-        
+
         if now.timeIntervalSince(changeTime) >= stabilizeDelay {
             Log.info("📝 EditTracker: edit stabilized after \(String(format: "%.1f", now.timeIntervalSince(changeTime)))s")
             triggerAnalysis(pastedText: tracked, editedField: currentContent)
         }
     }
-    
+
     private func triggerAnalysis(pastedText: String, editedField: String) {
         let savedKey = apiKey ?? ""
         let savedAppState = appState
-        
+
         stopTracking()
-        
+
         analyzeEdit(
             pastedText: pastedText,
             editedFieldContent: editedField,
@@ -286,57 +303,126 @@ class EditTracker {
             appState: savedAppState
         )
     }
-    
-    // MARK: - Character-Level Diff
-    
-    /// Compute character-level differences between original and edited text.
+
+    // MARK: - Token-Level Diff
+
+    /// Compute token-level differences between original and edited text.
     /// Returns array of (removed, inserted) string pairs.
     private func computeDiff(original: String, edited: String) -> [(removed: String, inserted: String)] {
-        let diff = edited.difference(from: original)
-        
-        var removals: [String] = []
-        var insertions: [String] = []
-        
-        for change in diff {
-            switch change {
-            case .remove(_, let element, _):
-                removals.append(String(element))
-            case .insert(_, let element, _):
-                insertions.append(String(element))
-            }
+        let originalTokens = tokenizeForDiff(original)
+        let editedTokens = tokenizeForDiff(edited)
+
+        guard originalTokens != editedTokens else { return [] }
+
+        var start = 0
+        while start < originalTokens.count,
+              start < editedTokens.count,
+              originalTokens[start].caseInsensitiveCompare(editedTokens[start]) == .orderedSame {
+            start += 1
         }
-        
-        // Merge consecutive characters into words/phrases
-        let removedText = removals.joined()
-        let insertedText = insertions.joined()
-        
+
+        var originalEnd = originalTokens.count - 1
+        var editedEnd = editedTokens.count - 1
+        while originalEnd >= start,
+              editedEnd >= start,
+              originalTokens[originalEnd].caseInsensitiveCompare(editedTokens[editedEnd]) == .orderedSame {
+            originalEnd -= 1
+            editedEnd -= 1
+        }
+
+        let removedTokens = start <= originalEnd ? Array(originalTokens[start...originalEnd]) : []
+        let insertedTokens = start <= editedEnd ? Array(editedTokens[start...editedEnd]) : []
+        let removedText = renderDiffTokens(removedTokens)
+        let insertedText = renderDiffTokens(insertedTokens)
+
         if !removedText.isEmpty || !insertedText.isEmpty {
             return [(removed: removedText, inserted: insertedText)]
         }
-        
+
         return []
     }
-    
+
+    private func tokenizeForDiff(_ text: String) -> [String] {
+        var tokens: [String] = []
+        var current = ""
+
+        func flushCurrent() {
+            if !current.isEmpty {
+                tokens.append(current)
+                current = ""
+            }
+        }
+
+        for char in text {
+            if isCJK(char) {
+                flushCurrent()
+                tokens.append(String(char))
+            } else if char.isLetter || char.isNumber || char == "'" {
+                current.append(char)
+            } else {
+                flushCurrent()
+            }
+        }
+        flushCurrent()
+
+        return tokens
+    }
+
+    private func renderDiffTokens(_ tokens: [String]) -> String {
+        var rendered = ""
+        var previousWasCJK = false
+
+        for token in tokens {
+            let currentIsCJK = token.count == 1 && token.first.map(isCJK) == true
+            if rendered.isEmpty {
+                rendered = token
+            } else if previousWasCJK || currentIsCJK {
+                rendered += token
+            } else {
+                rendered += " " + token
+            }
+            previousWasCJK = currentIsCJK
+        }
+
+        return rendered
+    }
+
+    private func isCJK(_ char: Character) -> Bool {
+        char.unicodeScalars.contains { scalar in
+            (0x4E00...0x9FFF).contains(Int(scalar.value))
+        }
+    }
+
+    private func hasSignificantOverlap(_ original: String, _ edited: String) -> Bool {
+        let originalTokens = Set(tokenizeForDiff(original).map { $0.lowercased() })
+        let editedTokens = Set(tokenizeForDiff(edited).map { $0.lowercased() })
+        guard !originalTokens.isEmpty, !editedTokens.isEmpty else { return false }
+
+        let intersection = originalTokens.intersection(editedTokens).count
+        let union = originalTokens.union(editedTokens).count
+        return Double(intersection) / Double(union) >= 0.45
+    }
+
     /// Check if modification is too large (>50% removed OR changed >2x)
     private func isLargeModification(original: String, edited: String) -> Bool {
         let origCount = original.count
         let editCount = edited.count
-        
+
         // More than 50% content removed
         if editCount < origCount / 2 {
             return true
         }
-        
+
         // Changed more than 2x
         if editCount > origCount * 2 || origCount > editCount * 2 {
             return true
         }
-        
+
         return false
     }
-    
+
     // MARK: - LLM Analysis
-    
+
     private func analyzeEdit(
         pastedText: String,
         editedFieldContent: String,
@@ -347,56 +433,56 @@ class EditTracker {
             Log.info("📝 EditTracker: no API key for analysis")
             return
         }
-        
+
         isAnalyzing = true
-        
+
         guard let url = URL(string: "https://api.groq.com/openai/v1/chat/completions") else {
             isAnalyzing = false
             return
         }
-        
+
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 10
-        
+
         let systemPrompt = """
         You compare two texts to find speech recognition (STT) errors that the user manually corrected.
-        
+
         TEXT A = the original STT output (what the speech-to-text system produced)
         TEXT B = the corrected version (what the user changed it to)
-        
+
         Find words in TEXT A that the user replaced with different words in TEXT B because the STT got them wrong.
         Only report replacements where the wrong word SOUNDS SIMILAR to the correct word (phonetic error):
         - Chinese homophones (同音字/近音字)
         - English words that sound similar
         - Mixed: English word misheard as Chinese or vice versa
-        
+
         Do NOT report: punctuation changes, added/deleted text, formatting, grammar edits.
-        
+
         Output format — the STT wrong word first, then arrow, then the user's correction:
         [wrong word from TEXT A] → [correct word from TEXT B]
-        
+
         One correction per line. If none found, output exactly: NONE
         """
-        
+
         // Cap field content to avoid huge payloads
         let cappedField = String(editedFieldContent.prefix(2000))
-        
+
         // Compute diff for more precise prompt
         let diffs = computeDiff(original: pastedText, edited: cappedField)
-        
+
         let userMessage: String
         if diffs.count == 1, let diff = diffs.first {
             // Small, focused diff — send specific change
             let removed = diff.removed.trimmingCharacters(in: .whitespacesAndNewlines)
             let inserted = diff.inserted.trimmingCharacters(in: .whitespacesAndNewlines)
-            
+
             if !removed.isEmpty && !inserted.isEmpty && removed.count < 50 && inserted.count < 50 {
                 userMessage = """
                 Changed: \(removed) → \(inserted)
-                
+
                 (Original full text: \(pastedText))
                 """
                 Log.info("📝 EditTracker: using focused diff prompt: [\(removed)] → [\(inserted)]")
@@ -405,7 +491,7 @@ class EditTracker {
                 userMessage = """
                 TEXT A (original STT output):
                 \(pastedText)
-                
+
                 TEXT B (after user's manual correction):
                 \(cappedField)
                 """
@@ -415,12 +501,12 @@ class EditTracker {
             userMessage = """
             TEXT A (original STT output):
             \(pastedText)
-            
+
             TEXT B (after user's manual correction):
             \(cappedField)
             """
         }
-        
+
         let payload: [String: Any] = [
             "model": "llama-3.3-70b-versatile",
             "messages": [
@@ -430,23 +516,23 @@ class EditTracker {
             "temperature": 0.0,
             "max_tokens": 200
         ]
-        
+
         guard let jsonData = try? JSONSerialization.data(withJSONObject: payload) else {
             isAnalyzing = false
             return
         }
         request.httpBody = jsonData
-        
+
         Log.info("📝 EditTracker: analyzing — original=[\(pastedText)] field=[\(String(cappedField.prefix(100)))]")
-        
+
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             defer { self?.isAnalyzing = false }
-            
+
             if let error = error {
                 Log.info("📝 EditTracker: LLM error: \(error.localizedDescription)")
                 return
             }
-            
+
             guard let data = data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let choices = json["choices"] as? [[String: Any]],
@@ -456,9 +542,9 @@ class EditTracker {
                 Log.info("📝 EditTracker: LLM bad response")
                 return
             }
-            
+
             let result = content.trimmingCharacters(in: .whitespacesAndNewlines)
-            
+
             // Treat various "no corrections" responses as NONE
             let lowerResult = result.lowercased()
             if result == "NONE" || result.isEmpty
@@ -473,24 +559,24 @@ class EditTracker {
                 Log.info("📝 EditTracker: no speech recognition corrections found (response: \(result.prefix(60)))")
                 return
             }
-            
+
             let corrections = self?.parseCorrections(result, sourceText: pastedText, editedText: cappedField) ?? []
-            
+
             if corrections.isEmpty {
                 Log.info("📝 EditTracker: no valid corrections parsed from: \(result)")
                 return
             }
-            
+
             // Apply corrections to dictionary
             DispatchQueue.main.async { [weak self] in
                 guard let appState = appState else { return }
-                
+
                 for (wrong, right) in corrections {
                     // Add as replacement only (doesn't use Whisper prompt space)
-                    appState.dictionary.addReplacement(wrong: wrong, right: right)
+                    appState.dictionary.addReplacement(wrong: wrong, right: right, source: .autoLearned)
                     Log.info("📝 Auto-learned: \(wrong) → \(right)")
                 }
-                
+
                 // Show overlay notification with Undo for the first correction
                 if let first = corrections.first {
                     let allCorrections = corrections
@@ -507,7 +593,7 @@ class EditTracker {
                         }
                     )
                 }
-                
+
                 // Log for offline analysis
                 self?.logAutoCorrection(
                     corrections: corrections,
@@ -517,12 +603,13 @@ class EditTracker {
             }
         }.resume()
     }
-    
+
     // MARK: - Parsing
-    
+
     /// Parse "wrong → right" lines from LLM output
     private func parseCorrections(_ text: String, sourceText: String, editedText: String) -> [(String, String)] {
         var corrections: [(String, String)] = []
+        var seen: Set<String> = []
 
         for line in text.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -541,7 +628,11 @@ class EditTracker {
 
                     // Context-aware validation
                     if isValidCorrection(wrong: wrong, right: right, sourceText: sourceText, editedText: editedText) {
-                        corrections.append((wrong, right))
+                        let key = wrong.lowercased()
+                        if !seen.contains(key) {
+                            corrections.append((wrong, right))
+                            seen.insert(key)
+                        }
                     }
                     break
                 }
@@ -717,9 +808,9 @@ class EditTracker {
 
         return prev[n]
     }
-    
+
     // MARK: - Logging
-    
+
     private func logAutoCorrection(
         corrections: [(String, String)],
         original: String,
@@ -729,18 +820,18 @@ class EditTracker {
             .appendingPathComponent(".config/typefish/logs")
         try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
         let logFile = logsDir.appendingPathComponent("auto-corrections.jsonl")
-        
+
         let entry: [String: Any] = [
             "timestamp": ISO8601DateFormatter().string(from: Date()),
             "original_pasted": original,
             "edited_field": editedField,
             "corrections": corrections.map { ["wrong": $0.0, "right": $0.1] }
         ]
-        
+
         guard let jsonData = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys]),
               var jsonString = String(data: jsonData, encoding: .utf8) else { return }
         jsonString += "\n"
-        
+
         if let handle = try? FileHandle(forWritingTo: logFile) {
             handle.seekToEndOfFile()
             handle.write(jsonString.data(using: .utf8)!)
@@ -748,7 +839,7 @@ class EditTracker {
         } else {
             try? jsonString.data(using: .utf8)?.write(to: logFile)
         }
-        
+
         Log.info("📝 EditTracker: logged \(corrections.count) correction(s) to auto-corrections.jsonl")
     }
 }

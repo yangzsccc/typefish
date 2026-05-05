@@ -29,136 +29,136 @@ class EditableTextField: NSTextField {
 }
 
 class MenuBarController {
-    
+
     private var statusItem: NSStatusItem!
     private let state: AppState
-    
+
     init(state: AppState) {
         self.state = state
         setupStatusItem()
-        
+
         // Listen for state changes
         state.onStateChange = { [weak self] in
             self?.updateIcon()
         }
-        
+
         // Check for updates on launch (silent, only prompts if update found)
         Updater.checkInBackground()
     }
-    
+
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        
+
         updateIcon()
-        
+
         // Create menu
         let menu = NSMenu()
-        
+
         let statusMenuItem = NSMenuItem(title: "TypeFish 🐟", action: nil, keyEquivalent: "")
         statusMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
-        
+
         menu.addItem(NSMenuItem.separator())
-        
+
         let hotkeyItem = NSMenuItem(title: "⌥ Space — Toggle Recording", action: nil, keyEquivalent: "")
         hotkeyItem.isEnabled = false
         menu.addItem(hotkeyItem)
-        
+
         let translateItem = NSMenuItem(title: "⌃⌥ Space — Translate to English", action: nil, keyEquivalent: "")
         translateItem.isEnabled = false
         menu.addItem(translateItem)
-        
+
         let commandItem = NSMenuItem(title: "⌃⌥⌘ Space — AI Command", action: nil, keyEquivalent: "")
         commandItem.isEnabled = false
         menu.addItem(commandItem)
-        
+
         let escItem = NSMenuItem(title: "⎋ Esc — Cancel Recording", action: nil, keyEquivalent: "")
         escItem.isEnabled = false
         menu.addItem(escItem)
-        
+
         menu.addItem(NSMenuItem.separator())
-        
+
         // Dictionary section
         let dictHeader = NSMenuItem(title: "📖 Dictionary", action: nil, keyEquivalent: "")
         dictHeader.isEnabled = false
         menu.addItem(dictHeader)
-        
+
         let addWordItem = NSMenuItem(title: "Add Word...", action: #selector(addWord), keyEquivalent: "d")
         addWordItem.target = self
         menu.addItem(addWordItem)
-        
+
         let addCorrectionItem = NSMenuItem(title: "Add Correction...", action: #selector(addCorrection), keyEquivalent: "")
         addCorrectionItem.target = self
         menu.addItem(addCorrectionItem)
-        
+
         let editDictItem = NSMenuItem(title: "Edit Dictionary File", action: #selector(editDictionary), keyEquivalent: "")
         editDictItem.target = self
         menu.addItem(editDictItem)
-        
+
         let reloadDictItem = NSMenuItem(title: "Reload Dictionary", action: #selector(reloadDictionary), keyEquivalent: "")
         reloadDictItem.target = self
         menu.addItem(reloadDictItem)
-        
+
         menu.addItem(NSMenuItem.separator())
-        
+
         // Microphone selection
         let micHeader = NSMenuItem(title: "🎤 Microphone", action: nil, keyEquivalent: "")
         micHeader.isEnabled = false
         menu.addItem(micHeader)
-        
+
         let currentMic = state.config.preferredMicrophone ?? "System Default"
         let micItem = NSMenuItem(title: "  Current: \(currentMic)", action: nil, keyEquivalent: "")
         micItem.isEnabled = false
         menu.addItem(micItem)
-        
+
         let selectMicItem = NSMenuItem(title: "  Select Microphone...", action: #selector(selectMicrophone), keyEquivalent: "")
         selectMicItem.target = self
         menu.addItem(selectMicItem)
-        
+
         menu.addItem(NSMenuItem.separator())
-        
+
         // Audio compression selection
         let compHeader = NSMenuItem(title: "🗜️ Audio Compression", action: nil, keyEquivalent: "")
         compHeader.isEnabled = false
         menu.addItem(compHeader)
-        
-        let currentComp = compressionTitle(for: state.config.audioCompressionBitrate)
+
+        let currentComp = AppState.compressionTitle(for: state.config.audioCompressionBitrate)
         let compItem = NSMenuItem(title: "  Current: \(currentComp)", action: nil, keyEquivalent: "")
         compItem.isEnabled = false
         menu.addItem(compItem)
-        
+
         let selectCompItem = NSMenuItem(title: "  Select Compression...", action: #selector(selectCompression), keyEquivalent: "")
         selectCompItem.target = self
         menu.addItem(selectCompItem)
-        
+
         menu.addItem(NSMenuItem.separator())
-        
+
         let pairTypelessItem = NSMenuItem(title: "📋 Pair Typeless Result", action: #selector(pairTypelessResult), keyEquivalent: "t")
         pairTypelessItem.target = self
         menu.addItem(pairTypelessItem)
-        
+
         menu.addItem(NSMenuItem.separator())
-        
+
         let versionItem = NSMenuItem(title: "v\(Updater.currentVersion)", action: nil, keyEquivalent: "")
         versionItem.isEnabled = false
         menu.addItem(versionItem)
-        
+
         let updateItem = NSMenuItem(title: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "u")
         updateItem.target = self
         menu.addItem(updateItem)
-        
+
         menu.addItem(NSMenuItem.separator())
-        
+
         let quitItem = NSMenuItem(title: "Quit TypeFish", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
-        
+
         statusItem.menu = menu
     }
-    
+
     func updateIcon() {
         guard let button = statusItem.button else { return }
-        
+
         if state.isRecording {
             if state.isCommandMode {
                 button.image = createIcon(command: true)
@@ -178,7 +178,7 @@ class MenuBarController {
             button.toolTip = "TypeFish — ⌥Space to dictate"
         }
     }
-    
+
     /// Create a simple menu bar icon
     private func createIcon(recording: Bool = false, processing: Bool = false, translate: Bool = false, command: Bool = false) -> NSImage {
         let size = NSSize(width: 18, height: 18)
@@ -229,88 +229,88 @@ class MenuBarController {
         image.isTemplate = !recording && !processing && !command  // Template for dark/light mode (normal state only)
         return image
     }
-    
+
     // MARK: - Dictionary Actions
-    
+
     @objc private func addWord() {
         let alert = NSAlert()
         alert.messageText = "Add Word (Whisper Hint)"
         alert.informativeText = "Add words Whisper often gets wrong.\nOnly for unusual/tricky words — common words don't need this.\nComma-separated for multiple."
         alert.addButton(withTitle: "Add")
         alert.addButton(withTitle: "Cancel")
-        
+
         let input = EditableTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
         input.placeholderString = "e.g. Junyan, pgvector, Chipotle"
         alert.accessoryView = input
         alert.window.initialFirstResponder = input
-        
+
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn {
             let words = input.stringValue
                 .components(separatedBy: ",")
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
-            
+
             for word in words {
-                state.dictionary.addHint(word)
+                state.addDictionaryHint(word)
             }
-            
+
             if !words.isEmpty {
                 showNotification("📖 Added \(words.count) hint(s): \(words.joined(separator: ", "))")
             }
         }
     }
-    
+
     @objc private func addCorrection() {
         let alert = NSAlert()
         alert.messageText = "Add Correction"
         alert.informativeText = "When Whisper outputs the wrong word, replace it.\nExample: 俊言 → Junyan"
         alert.addButton(withTitle: "Add")
         alert.addButton(withTitle: "Cancel")
-        
+
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 58))
-        
+
         let wrongLabel = NSTextField(labelWithString: "Wrong:")
         wrongLabel.frame = NSRect(x: 0, y: 34, width: 50, height: 20)
         container.addSubview(wrongLabel)
-        
+
         let wrongInput = EditableTextField(frame: NSRect(x: 55, y: 32, width: 245, height: 24))
         wrongInput.placeholderString = "What Whisper outputs"
         container.addSubview(wrongInput)
-        
+
         let rightLabel = NSTextField(labelWithString: "Right:")
         rightLabel.frame = NSRect(x: 0, y: 4, width: 50, height: 20)
         container.addSubview(rightLabel)
-        
+
         let rightInput = EditableTextField(frame: NSRect(x: 55, y: 2, width: 245, height: 24))
         rightInput.placeholderString = "What it should be"
         container.addSubview(rightInput)
-        
+
         alert.accessoryView = container
         alert.window.initialFirstResponder = wrongInput
-        
+
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn {
             let wrong = wrongInput.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let right = rightInput.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            
+
             if !wrong.isEmpty && !right.isEmpty {
-                state.dictionary.addReplacement(wrong: wrong, right: right)
+                state.addDictionaryReplacement(wrong: wrong, right: right, source: .manual)
                 showNotification("📖 Added: \(wrong) → \(right)")
             }
         }
     }
-    
+
     @objc private func editDictionary() {
         // Open dictionary file in default editor
         NSWorkspace.shared.open(CustomDictionary.fileURL)
     }
-    
+
     @objc private func reloadDictionary() {
-        state.dictionary = CustomDictionary.load()
+        state.reloadDictionary()
         showNotification("📖 Dictionary reloaded: \(state.dictionary.vocabulary.count) vocab, \(state.dictionary.replacements.count) replacements")
     }
-    
+
     private func showNotification(_ message: String) {
         Log.info(message)
         // Brief tooltip update
@@ -322,7 +322,7 @@ class MenuBarController {
             }
         }
     }
-    
+
     @objc private func pairTypelessResult() {
         // Read clipboard
         guard let clipboard = NSPasteboard.general.string(forType: .string),
@@ -330,24 +330,24 @@ class MenuBarController {
             showNotification("📋 Clipboard is empty — copy a Typeless result first")
             return
         }
-        
+
         // Pair with most recent log entry
         let logFile = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".config/typefish/logs/transcriptions.jsonl")
-        
+
         guard let content = try? String(contentsOf: logFile, encoding: .utf8) else {
             showNotification("❌ No transcription logs found")
             return
         }
-        
+
         var lines = content.split(separator: "\n", omittingEmptySubsequences: true)
             .map(String.init)
-        
+
         // Find most recent entry without typeless result
         var paired = false
         for i in stride(from: lines.count - 1, through: max(0, lines.count - 5), by: -1) {
             guard var entry = try? JSONSerialization.jsonObject(with: Data(lines[i].utf8)) as? [String: Any] else { continue }
-            
+
             let existing = entry["typeless_result"] as? String ?? ""
             if existing.isEmpty {
                 entry["typeless_result"] = clipboard
@@ -355,7 +355,7 @@ class MenuBarController {
                    let updatedStr = String(data: updated, encoding: .utf8) {
                     lines[i] = updatedStr
                     paired = true
-                    
+
                     let whisper = (entry["whisper_raw"] as? String ?? "").prefix(40)
                     Log.info("📋 Paired Typeless result with: \(whisper)...")
                     showNotification("✅ Paired with: \(whisper)...")
@@ -363,7 +363,7 @@ class MenuBarController {
                 }
             }
         }
-        
+
         if paired {
             let output = lines.joined(separator: "\n") + "\n"
             try? output.write(to: logFile, atomically: true, encoding: .utf8)
@@ -371,7 +371,7 @@ class MenuBarController {
             showNotification("⚠️ No recent entry to pair — use TypeFish first")
         }
     }
-    
+
     @objc private func selectMicrophone() {
         // List available input devices
         let devices: [AVCaptureDevice]
@@ -388,19 +388,19 @@ class MenuBarController {
                 position: .unspecified
             ).devices
         }
-        
+
         let alert = NSAlert()
         alert.messageText = "Select Microphone"
         alert.informativeText = "Choose which microphone TypeFish should use.\n\"System Default\" follows your system setting."
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Cancel")
-        
+
         let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 300, height: 28))
         popup.addItem(withTitle: "System Default")
         for device in devices {
             popup.addItem(withTitle: device.localizedName)
         }
-        
+
         // Pre-select current
         if let current = state.config.preferredMicrophone {
             for i in 0..<popup.numberOfItems {
@@ -410,33 +410,29 @@ class MenuBarController {
                 }
             }
         }
-        
+
         alert.accessoryView = popup
         NSApp.activate(ignoringOtherApps: true)
-        
+
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        
+
         let selected = popup.titleOfSelectedItem ?? "System Default"
         let micValue: String? = selected == "System Default" ? nil : selected
-        
+
         // Save to config file and update in-memory
-        state.config.preferredMicrophone = micValue
-        saveConfig(state.config)
-        
-        // Apply immediately
-        state.recorder.preferredMicrophone = micValue
-        
+        state.setPreferredMicrophone(micValue)
+
         showNotification("🎤 Microphone: \(selected)")
         Log.info("🎤 Microphone preference saved: \(selected)")
     }
-    
+
     @objc private func selectCompression() {
         let alert = NSAlert()
         alert.messageText = "Audio Compression"
         alert.informativeText = "Choose upload compression level. Higher compression = faster upload, lower accuracy."
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Cancel")
-        
+
         let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 340, height: 28))
         let options: [(String, Int)] = [
             ("Off (WAV, best quality, slowest)", 0),
@@ -446,52 +442,30 @@ class MenuBarController {
             ("Quality (96kbps)", 96000)
         ]
         for (title, _) in options { popup.addItem(withTitle: title) }
-        
+
         let current = state.config.audioCompressionBitrate
         if let idx = options.firstIndex(where: { $0.1 == current }) {
             popup.selectItem(at: idx)
         } else {
             popup.selectItem(at: 3) // default 64kbps
         }
-        
+
         alert.accessoryView = popup
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        
+
         let selectedIndex = popup.indexOfSelectedItem
         let selected = options[max(0, min(selectedIndex, options.count - 1))]
-        state.config.audioCompressionBitrate = selected.1
-        saveConfig(state.config)
-        
-        showNotification("🗜️ Compression: \(compressionTitle(for: selected.1))")
+        state.setAudioCompressionBitrate(selected.1)
+
+        showNotification("🗜️ Compression: \(AppState.compressionTitle(for: selected.1))")
         Log.info("🗜️ Compression bitrate saved: \(selected.1) bps")
     }
-    
-    private func compressionTitle(for bitrate: Int) -> String {
-        switch bitrate {
-        case 0: return "Off (WAV)"
-        case 32000: return "Aggressive (32kbps)"
-        case 48000: return "Fast (48kbps)"
-        case 64000: return "Balanced (64kbps)"
-        case 96000: return "Quality (96kbps)"
-        default: return "Custom (\(bitrate/1000)kbps)"
-        }
-    }
-    
-    private func saveConfig(_ config: AppConfig) {
-        let configURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/typefish/config.json")
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? encoder.encode(config) {
-            try? data.write(to: configURL)
-        }
-    }
-    
+
     @objc private func checkForUpdates() {
         Updater.checkManually()
     }
-    
+
     @objc private func quit() {
         NSApp.terminate(nil)
     }

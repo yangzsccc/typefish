@@ -19,6 +19,11 @@ let package = Package(
                 .linkedFramework("Carbon"),
                 .linkedFramework("AVFoundation"),
             ]
+        ),
+        .testTarget(
+            name: "TypeFishTests",
+            dependencies: ["TypeFish"],
+            path: "Tests/TypeFishTests"
         )
     ]
 )

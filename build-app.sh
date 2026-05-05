@@ -4,6 +4,7 @@ set -e
 
 echo "🐟 Building TypeFish..."
 cd "$(dirname "$0")"
+VERSION="$(grep 'currentVersion' Sources/TypeFish/Updater.swift | head -1 | sed 's/.*"\(.*\)".*/\1/')"
 
 # Build release
 swift build -c release 2>&1 | tail -3
@@ -53,9 +54,9 @@ cat > TypeFish.app/Contents/Info.plist << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.shuchen.typefish</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleExecutable</key>
     <string>TypeFish</string>
     <key>CFBundlePackageType</key>
