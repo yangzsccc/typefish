@@ -4,6 +4,7 @@ import QuartzCore
 /// A minimal floating indicator at the bottom center of the screen.
 /// Shows animated bars during recording, morphs for processing, then dismisses.
 class OverlayPanel {
+    static let autoLearnWindowTitle = "TypeFish Auto Learn"
     
     private var window: NSPanel?
     private var bars: [NSView] = []
@@ -270,8 +271,14 @@ class OverlayPanel {
     /// Includes an Undo button to revert the addition.
     func showAutoLearn(wrong: String, right: String, onUndo: @escaping () -> Void) {
         DispatchQueue.main.async { [weak self] in
+            Log.info("📝 Auto-learn overlay requested: \(wrong) → \(right)")
             self?.presentLearnNotification(wrong: wrong, right: right, onUndo: onUndo)
         }
+    }
+
+    func autoLearnWindowStateForTesting() -> (isVisible: Bool, alpha: CGFloat, frame: NSRect?) {
+        let window = learnWindow
+        return (window?.isVisible == true, window?.alphaValue ?? 0, window?.frame)
     }
     
     private func presentLearnNotification(wrong: String, right: String, onUndo: @escaping () -> Void) {
@@ -294,13 +301,16 @@ class OverlayPanel {
             backing: .buffered,
             defer: false
         )
+        panel.title = Self.autoLearnWindowTitle
         panel.isFloatingPanel = true
-        panel.level = .statusBar
+        panel.level = .screenSaver
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
         panel.ignoresMouseEvents = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         
         // Dark pill background
         let bg = NSView(frame: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight))
@@ -349,10 +359,11 @@ class OverlayPanel {
         }
         
         self.learnWindow = panel
+        Log.info("📝 Auto-learn overlay presented: visible=\(panel.isVisible) frame=\(NSStringFromRect(panel.frame)) level=\(panel.level.rawValue)")
         
-        // Auto-dismiss after 4 seconds
+        // Auto-dismiss after 8 seconds
         learnDismissTimer?.invalidate()
-        learnDismissTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
+        learnDismissTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: false) { [weak self] _ in
             self?.dismissLearnWindow()
         }
     }

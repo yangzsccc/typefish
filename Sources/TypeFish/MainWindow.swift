@@ -1,6 +1,47 @@
 import AppKit
 import AVFoundation
 
+struct DictionaryColumnLayout {
+    static let minimumWrongWidth: CGFloat = 200
+    static let minimumReplacementWidth: CGFloat = 260
+    static let sourceWidth: CGFloat = 112
+
+    static func widths(availableWidth: CGFloat, showsReplacementColumns: Bool) -> (wrong: CGFloat, replacement: CGFloat, source: CGFloat) {
+        let width = max(availableWidth, 1)
+        guard showsReplacementColumns else {
+            return (wrong: width, replacement: 0, source: 0)
+        }
+
+        let minimumTotal = minimumWrongWidth + minimumReplacementWidth + sourceWidth
+        let usableWidth = max(width, minimumTotal)
+        if usableWidth == minimumTotal {
+            return (wrong: minimumWrongWidth, replacement: minimumReplacementWidth, source: sourceWidth)
+        }
+
+        let remainingWidth = usableWidth - sourceWidth
+        var wrongWidth = max(minimumWrongWidth, floor(remainingWidth * 0.45))
+        var replacementWidth = remainingWidth - wrongWidth
+        if replacementWidth < minimumReplacementWidth {
+            replacementWidth = minimumReplacementWidth
+            wrongWidth = remainingWidth - replacementWidth
+        }
+
+        return (wrong: wrongWidth, replacement: replacementWidth, source: sourceWidth)
+    }
+}
+
+private final class DictionaryTableView: NSTableView {
+    var onFrameWidthChanged: (() -> Void)?
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let oldWidth = frame.width
+        super.setFrameSize(newSize)
+        if abs(oldWidth - newSize.width) > 0.5 {
+            onFrameWidthChanged?()
+        }
+    }
+}
+
 /// Regular Dock-accessible TypeFish control center.
 /// Hosts status, settings, dictionary editing, and learning visibility.
 class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
@@ -406,29 +447,34 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
 
-        let table = NSTableView(frame: scroll.bounds)
+        let table = DictionaryTableView(frame: scroll.bounds)
         table.usesAlternatingRowBackgroundColors = false
         table.backgroundColor = .clear
         table.rowHeight = 30
         table.gridStyleMask = []
         table.intercellSpacing = NSSize(width: 0, height: 0)
+        table.columnAutoresizingStyle = .noColumnAutoresizing
         table.delegate = self
         table.dataSource = self
         table.allowsMultipleSelection = false
+        table.onFrameWidthChanged = { [weak self] in
+            self?.updateDictionaryColumns(for: self?.selectedDictionaryKind() ?? .hints)
+        }
 
         let wrongColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("wrong"))
         wrongColumn.title = "Term"
-        wrongColumn.width = 260
+        wrongColumn.minWidth = DictionaryColumnLayout.minimumWrongWidth
         table.addTableColumn(wrongColumn)
 
         let rightColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("right"))
         rightColumn.title = "Replacement"
-        rightColumn.width = 260
+        rightColumn.minWidth = DictionaryColumnLayout.minimumReplacementWidth
         table.addTableColumn(rightColumn)
 
         let sourceColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("source"))
         sourceColumn.title = "Source"
-        sourceColumn.width = 120
+        sourceColumn.minWidth = DictionaryColumnLayout.sourceWidth
+        sourceColumn.maxWidth = DictionaryColumnLayout.sourceWidth
         table.addTableColumn(sourceColumn)
 
         scroll.documentView = table
@@ -673,9 +719,26 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
     private func updateDictionaryColumns(for kind: DictionaryViewKind) {
         guard let table = dictionaryTable else { return }
-        table.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("wrong"))?.title = (kind == .hints || kind == .vocabulary) ? "Term" : "Wrong"
-        table.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("right"))?.isHidden = (kind == .hints || kind == .vocabulary)
-        table.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("source"))?.isHidden = (kind == .hints || kind == .vocabulary)
+        guard let wrongColumn = table.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("wrong")),
+              let rightColumn = table.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("right")),
+              let sourceColumn = table.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("source")) else {
+            return
+        }
+
+        let showsReplacementColumns = !(kind == .hints || kind == .vocabulary)
+        let availableWidth = table.enclosingScrollView?.contentView.bounds.width ?? table.bounds.width
+        let widths = DictionaryColumnLayout.widths(
+            availableWidth: availableWidth,
+            showsReplacementColumns: showsReplacementColumns
+        )
+
+        wrongColumn.title = showsReplacementColumns ? "Wrong" : "Term"
+        rightColumn.isHidden = !showsReplacementColumns
+        sourceColumn.isHidden = !showsReplacementColumns
+
+        wrongColumn.width = widths.wrong
+        rightColumn.width = widths.replacement
+        sourceColumn.width = widths.source
     }
 
     private func updateDictionaryButtons() {

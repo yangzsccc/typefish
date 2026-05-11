@@ -23,12 +23,23 @@ class HotkeyManager {
     
     /// Called on any keypress when EditTracker is active
     var onAnyKeyPress: (() -> Void)?
+
+    /// Called with a normalized key event when EditTracker is active.
+    var onTrackedKeyEvent: ((EditMirrorEvent) -> Void)?
     
     /// Called when Enter key is pressed (for immediate analysis)
     var onEnterKey: (() -> Void)?
+
+    /// Called when Enter is intercepted so EditTracker can snapshot before the draft is sent.
+    var onInterceptedEnterKey: (() -> Void)?
+
+    /// Returns true when EditTracker wants to hold Enter briefly for a before-send snapshot.
+    var shouldInterceptEnterForEditTracking: (() -> Bool)?
     
     /// Flag to enable/disable keypress tracking for EditTracker
     var isTrackingEdits: Bool = false
+
+    private var isReplayingTrackedEnter = false
     
     // Singleton needed because CGEvent tap callback is a C function pointer
     static var shared: HotkeyManager?
@@ -121,21 +132,57 @@ class HotkeyManager {
             return Unmanaged.passRetained(event)
         }
         
-        // Enter key (keyCode 36) — immediate analysis when tracking edits
-        if keyCode == 36 && HotkeyManager.shared?.isTrackingEdits == true {
+        // Enter key (keyCode 36) — immediate analysis when tracking edits.
+        if keyCode == 36 && meaningful.isEmpty && HotkeyManager.shared?.isTrackingEdits == true {
+            if HotkeyManager.shared?.isReplayingTrackedEnter == true {
+                HotkeyManager.shared?.isReplayingTrackedEnter = false
+                return Unmanaged.passRetained(event)
+            }
+
+            if HotkeyManager.shared?.shouldInterceptEnterForEditTracking?() == true {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    HotkeyManager.shared?.onInterceptedEnterKey?()
+                }
+                return nil
+            }
+
             DispatchQueue.main.async {
                 HotkeyManager.shared?.onEnterKey?()
             }
         }
         
-        // If EditTracker is active, fire onAnyKeyPress callback for any keypress
+        // If EditTracker is active, send the key details first, then fire the legacy callback.
         if HotkeyManager.shared?.isTrackingEdits == true {
+            let characters = characters(from: event)
+            let mirrorEvent = EditMirrorEvent.fromKeyEvent(
+                keyCode: keyCode,
+                characters: characters,
+                modifiers: meaningful
+            )
             DispatchQueue.main.async {
+                HotkeyManager.shared?.onTrackedKeyEvent?(mirrorEvent)
                 HotkeyManager.shared?.onAnyKeyPress?()
             }
         }
         
         return Unmanaged.passRetained(event)
+    }
+
+    func replayEnterForEditTracking() {
+        isReplayingTrackedEnter = true
+
+        let source = CGEventSource(stateID: .hidSystemState)
+        if let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: true) {
+            keyDown.post(tap: .cghidEventTap)
+        }
+        usleep(10_000)
+        if let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: false) {
+            keyUp.post(tap: .cghidEventTap)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.isReplayingTrackedEnter = false
+        }
     }
     
     func stop() {
@@ -147,8 +194,23 @@ class HotkeyManager {
         }
         eventTap = nil
         runLoopSource = nil
+        onInterceptedEnterKey = nil
+        shouldInterceptEnterForEditTracking = nil
+        onTrackedKeyEvent = nil
         HotkeyManager.shared = nil
     }
     
     deinit { stop() }
+
+    private static func characters(from event: CGEvent) -> String {
+        var length = 0
+        var buffer = [UniChar](repeating: 0, count: 16)
+        event.keyboardGetUnicodeString(
+            maxStringLength: buffer.count,
+            actualStringLength: &length,
+            unicodeString: &buffer
+        )
+        guard length > 0 else { return "" }
+        return String(utf16CodeUnits: buffer, count: length)
+    }
 }

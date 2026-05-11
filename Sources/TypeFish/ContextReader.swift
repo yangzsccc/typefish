@@ -124,6 +124,58 @@ enum ContextReader {
         
         return selectedText?.isEmpty == true ? nil : selectedText
     }
+
+    /// Read the focused draft by briefly selecting all and copying it.
+    /// Used only as an explicit before-send fallback for apps that do not expose AXValue.
+    static func readFullContentViaClipboardSnapshot(collapseSelectionToEnd: Bool = true) -> String? {
+        let pasteboard = NSPasteboard.general
+        let snapshot = PasteboardSnapshot.capture(from: pasteboard)
+        let sentinel = "__TYPEFISH_CONTEXT_SNAPSHOT_\(UUID().uuidString)__"
+
+        if let app = PasteService.savedApp {
+            app.activate(options: [])
+            usleep(120_000)
+        }
+
+        simulateKey(0x00, flags: .maskCommand)  // A
+        usleep(160_000)
+
+        pasteboard.clearContents()
+        pasteboard.setString(sentinel, forType: .string)
+
+        simulateKey(0x08, flags: .maskCommand)  // C
+
+        var copied = pasteboard.string(forType: .string)
+        var copySucceeded = copied != sentinel
+        if !copySucceeded {
+            for _ in 0..<5 {
+                usleep(80_000)
+                copied = pasteboard.string(forType: .string)
+                if copied != sentinel {
+                    copySucceeded = true
+                    break
+                }
+            }
+        }
+
+        snapshot.restore(to: pasteboard)
+
+        if collapseSelectionToEnd {
+            simulateKey(0x7C)  // Right Arrow
+        }
+
+        let usable = usableClipboardSnapshotText(copied: copied, oldString: nil, changed: copySucceeded)
+        if let usable {
+            Log.info("📖 Context snapshot: copied \(usable.count) chars (copySucceeded=\(copySucceeded))")
+        } else {
+            Log.info("📖 Context snapshot: no usable copied text (copySucceeded=\(copySucceeded))")
+        }
+        return usable
+    }
+
+    static func usableClipboardSnapshotTextForTesting(copied: String?, oldString: String?, changed: Bool) -> String? {
+        usableClipboardSnapshotText(copied: copied, oldString: oldString, changed: changed)
+    }
     
     /// Read the FULL text content of the currently focused text field.
     /// Used by EditTracker to monitor post-paste edits.
@@ -238,5 +290,57 @@ enum ContextReader {
         
         Log.info("📖 Context: captured \(trimmed.count) chars from \(role) in \(app.localizedName ?? "?")")
         return trimmed
+    }
+
+    private static func simulateKey(_ keyCode: CGKeyCode, flags: CGEventFlags = []) {
+        let source = CGEventSource(stateID: .hidSystemState)
+        if let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true) {
+            keyDown.flags = flags
+            keyDown.post(tap: .cghidEventTap)
+        }
+        usleep(10_000)
+        if let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) {
+            keyUp.flags = flags
+            keyUp.post(tap: .cghidEventTap)
+        }
+    }
+
+    private static func usableClipboardSnapshotText(copied: String?, oldString: String?, changed: Bool) -> String? {
+        guard changed else { return nil }
+        guard let text = copied else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return text
+    }
+
+    private struct PasteboardSnapshot {
+        let items: [[NSPasteboard.PasteboardType: Data]]
+
+        static func capture(from pasteboard: NSPasteboard) -> PasteboardSnapshot {
+            let captured = (pasteboard.pasteboardItems ?? []).map { item in
+                var values: [NSPasteboard.PasteboardType: Data] = [:]
+                for type in item.types {
+                    if let data = item.data(forType: type) {
+                        values[type] = data
+                    }
+                }
+                return values
+            }
+            return PasteboardSnapshot(items: captured)
+        }
+
+        func restore(to pasteboard: NSPasteboard) {
+            pasteboard.clearContents()
+            let restoredItems = items.map { values -> NSPasteboardItem in
+                let item = NSPasteboardItem()
+                for (type, data) in values {
+                    item.setData(data, forType: type)
+                }
+                return item
+            }
+            if !restoredItems.isEmpty {
+                pasteboard.writeObjects(restoredItems)
+            }
+        }
     }
 }

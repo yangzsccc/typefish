@@ -45,7 +45,51 @@ class EditTracker {
     private static var lastPastedText: String?
     private static var lastPasteTime: Date?
 
+    private var captureMode: EditCaptureMode = .accessibility
+    private var eventMirror: EditMirrorBuffer?
+
+    private static let eventMirrorBundleIDs: Set<String> = [
+        "com.openai.codex"
+    ]
+
+    private static let clipboardSnapshotBundleIDs: Set<String> = [
+        "com.apple.Safari",
+        "com.google.Chrome",
+        "com.microsoft.edgemac",
+        "com.brave.Browser",
+        "org.mozilla.firefox",
+        "com.hnc.Discord",
+        "com.tinyspeck.slackmacgap",
+        "com.microsoft.teams",
+        "com.microsoft.teams2"
+    ]
+
+    private static let terminalBundleIDs: Set<String> = [
+        "com.apple.Terminal",
+        "com.mitchellh.ghostty",
+        "com.googlecode.iterm2",
+        "dev.warp.Warp-Stable"
+    ]
+
     private init() {}
+
+    private static func captureMode(for bundleIdentifier: String?) -> EditCaptureMode {
+        guard let bundleIdentifier else { return .accessibility }
+
+        if eventMirrorBundleIDs.contains(bundleIdentifier) {
+            return .eventMirror
+        }
+
+        if terminalBundleIDs.contains(bundleIdentifier) {
+            return .terminalShellIntegration
+        }
+
+        if clipboardSnapshotBundleIDs.contains(bundleIdentifier) {
+            return .clipboardSnapshot
+        }
+
+        return .accessibility
+    }
 
     static func computeDiffForTesting(original: String, edited: String) -> [(removed: String, inserted: String)] {
         shared.computeDiff(original: original, edited: edited)
@@ -57,6 +101,33 @@ class EditTracker {
 
     static func parseCorrectionsForTesting(_ text: String, sourceText: String, editedText: String) -> [(String, String)] {
         shared.parseCorrections(text, sourceText: sourceText, editedText: editedText)
+    }
+
+    static func shouldAnalyzeEditForTesting(original: String, edited: String) -> Bool {
+        shared.shouldAnalyzeEdit(original: original, edited: edited)
+    }
+
+    static func captureModeForTesting(bundleIdentifier: String?) -> EditCaptureMode {
+        captureMode(for: bundleIdentifier)
+    }
+
+    static func evaluateBeforeSendSnapshotForTesting(original: String) -> (snapshot: String?, shouldAnalyze: Bool) {
+        let snapshot = ContextReader.readFullContentViaClipboardSnapshot()
+        return (snapshot, snapshot.map { shared.shouldAnalyzeEdit(original: original, edited: $0) } ?? false)
+    }
+
+    static func shouldUseBeforeSendSnapshotForTesting(
+        bundleIdentifier: String?,
+        failedReadCount: Int,
+        isTracking: Bool,
+        isAnalyzing: Bool
+    ) -> Bool {
+        shouldUseBeforeSendSnapshot(
+            bundleIdentifier: bundleIdentifier,
+            failedReadCount: failedReadCount,
+            isTracking: isTracking,
+            isAnalyzing: isAnalyzing
+        )
     }
 
     // MARK: - Public API
@@ -80,6 +151,10 @@ class EditTracker {
         self.apiKey = apiKey
         self.appState = appState
         self.trackingStartTime = Date()
+        self.captureMode = Self.captureMode(for: PasteService.savedApp?.bundleIdentifier)
+        self.eventMirror = captureMode.usesEventMirror
+            ? EditMirrorBuffer(originalText: pastedText)
+            : nil
 
         // Save for clipboard fallback
         EditTracker.lastPastedText = pastedText
@@ -93,8 +168,20 @@ class EditTracker {
             self?.handleKeyPress()
         }
 
+        HotkeyManager.shared?.onTrackedKeyEvent = { [weak self] event in
+            self?.handleTrackedKeyEvent(event)
+        }
+
         HotkeyManager.shared?.onEnterKey = { [weak self] in
             self?.handleEnterKey()
+        }
+
+        HotkeyManager.shared?.onInterceptedEnterKey = { [weak self] in
+            self?.handleInterceptedEnterKey()
+        }
+
+        HotkeyManager.shared?.shouldInterceptEnterForEditTracking = { [weak self] in
+            self?.shouldUseBeforeSendSnapshot() ?? false
         }
 
         // Set up 15s timeout
@@ -104,7 +191,7 @@ class EditTracker {
         self.timeoutWorkItem = timeoutItem
         DispatchQueue.main.asyncAfter(deadline: .now() + trackingDuration, execute: timeoutItem)
 
-        Log.info("📝 EditTracker: started keyboard-driven tracking for \(pastedText.count) chars")
+        Log.info("📝 EditTracker: started keyboard-driven tracking for \(pastedText.count) chars captureMode=\(captureMode.rawValue) app=\(PasteService.savedApp?.localizedName ?? "unknown")")
     }
 
     /// Check clipboard for edits (fallback for Electron apps where AX fails)
@@ -149,6 +236,8 @@ class EditTracker {
         appState = nil
         lastChangeTime = nil
         lastFieldContent = nil
+        captureMode = .accessibility
+        eventMirror = nil
 
         // Log summary of suppressed messages
         if cannotReadLogCount > 1 {
@@ -163,10 +252,23 @@ class EditTracker {
         // Disable keyboard tracking
         HotkeyManager.shared?.isTrackingEdits = false
         HotkeyManager.shared?.onAnyKeyPress = nil
+        HotkeyManager.shared?.onTrackedKeyEvent = nil
         HotkeyManager.shared?.onEnterKey = nil
+        HotkeyManager.shared?.onInterceptedEnterKey = nil
+        HotkeyManager.shared?.shouldInterceptEnterForEditTracking = nil
     }
 
     // MARK: - Keyboard Event Handlers
+
+    private func handleTrackedKeyEvent(_ event: EditMirrorEvent) {
+        guard captureMode.usesEventMirror, eventMirror != nil else { return }
+
+        eventMirror?.apply(event)
+
+        if let mirror = eventMirror, !mirror.isReliable {
+            Log.info("📝 EditTracker: event mirror became unreliable; falling back to readable/snapshot paths if available")
+        }
+    }
 
     /// Called on every keypress while tracking is active
     private func handleKeyPress() {
@@ -199,12 +301,78 @@ class EditTracker {
     private func handleEnterKey() {
         Log.info("📝 EditTracker: Enter key pressed, triggering immediate analysis (after \(keypressLogCount) keypresses)")
         debounceWorkItem?.cancel()
+        if triggerEventMirrorAnalysisIfReady(reason: "enter") {
+            return
+        }
         readAndCheckForEdits(immediate: true)
+    }
+
+    /// Called when Enter is held briefly so we can snapshot an AX-invisible chat draft before it sends.
+    private func handleInterceptedEnterKey() {
+        Log.info("📝 EditTracker: intercepted Enter for before-send snapshot")
+        debounceWorkItem?.cancel()
+
+        guard let tracked = trackedText else {
+            HotkeyManager.shared?.replayEnterForEditTracking()
+            return
+        }
+
+        if triggerEventMirrorAnalysisIfReady(reason: "before-send") {
+            HotkeyManager.shared?.replayEnterForEditTracking()
+            return
+        }
+
+        if let snapshot = ContextReader.readFullContentViaClipboardSnapshot() {
+            Log.info("📝 EditTracker: clipboard snapshot captured \(snapshot.count) chars before send")
+            if shouldAnalyzeEdit(original: tracked, edited: snapshot) {
+                triggerAnalysis(pastedText: tracked, editedField: snapshot)
+            } else {
+                Log.info("📝 EditTracker: before-send snapshot rejected by safety gate")
+                stopTracking()
+            }
+        } else {
+            Log.info("📝 EditTracker: before-send snapshot failed")
+            stopTracking()
+        }
+
+        HotkeyManager.shared?.replayEnterForEditTracking()
+    }
+
+    private func shouldUseBeforeSendSnapshot() -> Bool {
+        if captureMode.usesEventMirror {
+            return trackedText != nil && !isAnalyzing && eventMirror?.hasChanged == true
+        }
+
+        if captureMode == .clipboardSnapshot {
+            return trackedText != nil && !isAnalyzing && keypressLogCount > 0
+        }
+
+        return Self.shouldUseBeforeSendSnapshot(
+            bundleIdentifier: PasteService.savedApp?.bundleIdentifier,
+            failedReadCount: cannotReadLogCount,
+            isTracking: trackedText != nil,
+            isAnalyzing: isAnalyzing
+        )
+    }
+
+    private static func shouldUseBeforeSendSnapshot(
+        bundleIdentifier: String?,
+        failedReadCount: Int,
+        isTracking: Bool,
+        isAnalyzing: Bool
+    ) -> Bool {
+        guard isTracking, !isAnalyzing, failedReadCount > 0 else { return false }
+        guard let bundleIdentifier else { return false }
+        return captureMode(for: bundleIdentifier) == .clipboardSnapshot
     }
 
     /// Called when 15s timeout expires
     private func handleTimeout() {
         guard let tracked = trackedText else { return }
+
+        if triggerEventMirrorAnalysisIfReady(reason: "timeout") {
+            return
+        }
 
         // If there's a pending stable edit, analyze it
         if let lastContent = lastFieldContent, lastChangeTime != nil {
@@ -232,6 +400,9 @@ class EditTracker {
             // Fallback to full content reading
             Log.info("📝 EditTracker: cursor reading failed, using full content")
             currentContent = fullContent
+        } else if let mirroredContent = eventMirror?.authoritativeTextForAnalysis {
+            Log.info("📝 EditTracker: using event mirror content captureMode=\(captureMode.rawValue)")
+            currentContent = mirroredContent
         } else {
             cannotReadLogCount += 1
             if cannotReadLogCount == 1 {
@@ -249,6 +420,11 @@ class EditTracker {
 
         // Check for large modifications using character-level diff
         if isLargeModification(original: tracked, edited: currentContent) {
+            if captureMode.usesEventMirror && !immediate {
+                lastChangeTime = Date()
+                lastFieldContent = currentContent
+                return
+            }
             Log.info("📝 EditTracker: large modification detected (orig=\(tracked.count) edit=\(currentContent.count)), stopping")
             stopTracking()
             return
@@ -302,6 +478,24 @@ class EditTracker {
             apiKey: savedKey,
             appState: savedAppState
         )
+    }
+
+    private func triggerEventMirrorAnalysisIfReady(reason: String) -> Bool {
+        guard captureMode.usesEventMirror,
+              let tracked = trackedText,
+              let mirrored = eventMirror?.authoritativeTextForAnalysis else {
+            return false
+        }
+
+        guard shouldAnalyzeEdit(original: tracked, edited: mirrored) else {
+            Log.info("📝 EditTracker: event mirror edit rejected by safety gate reason=\(reason)")
+            stopTracking()
+            return true
+        }
+
+        Log.info("📝 EditTracker: event mirror captured \(mirrored.count) chars reason=\(reason)")
+        triggerAnalysis(pastedText: tracked, editedField: mirrored)
+        return true
     }
 
     // MARK: - Token-Level Diff
@@ -421,6 +615,36 @@ class EditTracker {
         return false
     }
 
+    private func shouldAnalyzeEdit(original: String, edited: String) -> Bool {
+        let trimmedOriginal = original.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedEdited = edited.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedOriginal.isEmpty, !trimmedEdited.isEmpty else { return false }
+        guard trimmedOriginal != trimmedEdited else { return false }
+        guard hasSignificantOverlap(trimmedOriginal, trimmedEdited) else { return false }
+        guard !isLargeModification(original: trimmedOriginal, edited: trimmedEdited) else { return false }
+
+        let diffs = computeDiff(original: trimmedOriginal, edited: trimmedEdited)
+        guard diffs.count == 1, let diff = diffs.first else { return false }
+
+        let removed = diff.removed.trimmingCharacters(in: .whitespacesAndNewlines)
+        let inserted = diff.inserted.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !removed.isEmpty, !inserted.isEmpty else { return false }
+
+        let removedTokens = tokenizeForDiff(removed)
+        let insertedTokens = tokenizeForDiff(inserted)
+        guard !removedTokens.isEmpty, !insertedTokens.isEmpty else { return false }
+        guard removedTokens.count <= 3, insertedTokens.count <= 3 else { return false }
+
+        guard removed.count >= 2, inserted.count >= 2 else { return false }
+        guard removed.count <= 20, inserted.count <= 20 else { return false }
+
+        let lenRatio = Double(max(removed.count, inserted.count)) / Double(max(min(removed.count, inserted.count), 1))
+        guard lenRatio <= 2.0 else { return false }
+        guard abs(removed.count - inserted.count) <= 4 else { return false }
+
+        return phoneticSimilarity(wrong: removed, right: inserted) >= 0.4
+    }
+
     // MARK: - LLM Analysis
 
     private func analyzeEdit(
@@ -429,6 +653,12 @@ class EditTracker {
         apiKey: String,
         appState: AppState?
     ) {
+        let cappedField = String(editedFieldContent.prefix(2000))
+        guard shouldAnalyzeEdit(original: pastedText, edited: cappedField) else {
+            Log.info("📝 EditTracker: edit rejected before LLM by safety gate")
+            return
+        }
+
         guard !apiKey.isEmpty else {
             Log.info("📝 EditTracker: no API key for analysis")
             return
@@ -466,9 +696,6 @@ class EditTracker {
 
         One correction per line. If none found, output exactly: NONE
         """
-
-        // Cap field content to avoid huge payloads
-        let cappedField = String(editedFieldContent.prefix(2000))
 
         // Compute diff for more precise prompt
         let diffs = computeDiff(original: pastedText, edited: cappedField)

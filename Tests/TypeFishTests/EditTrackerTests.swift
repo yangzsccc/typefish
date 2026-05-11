@@ -44,4 +44,74 @@ final class EditTrackerTests: XCTestCase {
         XCTAssertEqual(corrections.first?.0, "Chat GBT")
         XCTAssertEqual(corrections.first?.1, "ChatGPT")
     }
+
+    func testEditAnalysisGateAllowsSmallPhoneticCorrection() {
+        XCTAssertTrue(EditTracker.shouldAnalyzeEditForTesting(
+            original: "Please use Chat GBT for this response.",
+            edited: "Please use ChatGPT for this response."
+        ))
+    }
+
+    func testEditAnalysisGateAllowsCloudToClaudeCorrection() {
+        XCTAssertTrue(EditTracker.shouldAnalyzeEditForTesting(
+            original: "所以我觉得最好的coding工具是Cloud Code，不是OpenCloud。",
+            edited: "所以我觉得最好的coding工具是Claude Code，不是OpenCloud。"
+        ))
+    }
+
+    func testEditAnalysisGateRejectsLargeLengthDifference() {
+        XCTAssertFalse(EditTracker.shouldAnalyzeEditForTesting(
+            original: "Use API for this request.",
+            edited: "Use Application for this request."
+        ))
+    }
+
+    func testEditAnalysisGateRejectsNonPhoneticReplacement() {
+        XCTAssertFalse(EditTracker.shouldAnalyzeEditForTesting(
+            original: "Send this to OpenClaw.",
+            edited: "Send this to Calendar."
+        ))
+    }
+
+    func testBeforeSendSnapshotOnlyForKnownAXFailingSendApps() {
+        XCTAssertFalse(EditTracker.shouldUseBeforeSendSnapshotForTesting(
+            bundleIdentifier: "com.openai.codex",
+            failedReadCount: 1,
+            isTracking: true,
+            isAnalyzing: false
+        ))
+
+        XCTAssertTrue(EditTracker.shouldUseBeforeSendSnapshotForTesting(
+            bundleIdentifier: "com.hnc.Discord",
+            failedReadCount: 1,
+            isTracking: true,
+            isAnalyzing: false
+        ))
+
+        XCTAssertFalse(EditTracker.shouldUseBeforeSendSnapshotForTesting(
+            bundleIdentifier: "com.apple.TextEdit",
+            failedReadCount: 1,
+            isTracking: true,
+            isAnalyzing: false
+        ))
+    }
+
+    func testClipboardSnapshotKeepsCopiedTextAfterSentinelReplacement() {
+        XCTAssertEqual(
+            ContextReader.usableClipboardSnapshotTextForTesting(
+                copied: "所以我觉得最好的coding工具是Claude Code，不是OpenCloud。",
+                oldString: "所以我觉得最好的coding工具是Claude Code，不是OpenCloud。",
+                changed: true
+            ),
+            "所以我觉得最好的coding工具是Claude Code，不是OpenCloud。"
+        )
+    }
+
+    func testClipboardSnapshotRejectsUnchangedStaleClipboardText() {
+        XCTAssertNil(ContextReader.usableClipboardSnapshotTextForTesting(
+            copied: "那现在最好的coding工具是Cloud Code还是OpenCloud？",
+            oldString: "那现在最好的coding工具是Cloud Code还是OpenCloud？",
+            changed: false
+        ))
+    }
 }
