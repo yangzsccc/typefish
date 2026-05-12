@@ -156,6 +156,34 @@ final class ContextSnapshotE2ETests: XCTestCase {
         }
 
         Thread.sleep(forTimeInterval: 2.0)
+        try activateChromeComposer(profile: profile)
+    }
+
+    private static func activateChromeComposer(profile: URL) throws {
+        let pid = try chromeComposerProcessID(profile: profile)
+        try runAppleScript("""
+        tell application "System Events"
+            set frontmost of first application process whose unix id is \(pid) to true
+        end tell
+        delay 1.0
+        """)
+    }
+
+    private static func chromeComposerProcessID(profile: URL) throws -> Int32 {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        process.arguments = ["-f", profile.path]
+        process.standardOutput = output
+        try process.run()
+        process.waitUntilExit()
+
+        let text = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        guard let firstLine = text.split(separator: "\n").first,
+              let pid = Int32(firstLine.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            throw E2EError.chromeProcessNotFound
+        }
+        return pid
     }
 
     private static func killChromeComposer(profile: URL) {
@@ -222,5 +250,6 @@ final class ContextSnapshotE2ETests: XCTestCase {
     private enum E2EError: Error {
         case launchFailed(Int32)
         case appleScriptFailed(String)
+        case chromeProcessNotFound
     }
 }

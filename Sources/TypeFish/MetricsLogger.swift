@@ -25,6 +25,19 @@ enum MetricsLogger {
         var wasFallback: Bool = false     // polisher used fallback model
         var wasRetry: Bool = false        // whisper was retried
     }
+
+    struct Stats: Equatable {
+        var total: Int = 0
+        var success: Int = 0
+        var errors: [String: Int] = [:]
+        var avgWhisperMs: Int = 0
+        var avgPolishMs: Int = 0
+        var avgTotalMs: Int = 0
+
+        var successRate: Int {
+            total > 0 ? Int(Double(success) / Double(total) * 100) : 0
+        }
+    }
     
     static func log(_ metrics: PipelineMetrics) {
         var dict: [String: Any] = [
@@ -59,19 +72,24 @@ enum MetricsLogger {
     }
     
     /// Read recent metrics for health display
-    static func recentStats(hours: Int = 24) -> (total: Int, success: Int, errors: [String: Int], avgWhisperMs: Int, avgPolishMs: Int) {
+    static func recentStats(hours: Int = 24) -> Stats {
         guard let content = try? String(contentsOfFile: metricsPath, encoding: .utf8) else {
-            return (0, 0, [:], 0, 0)
+            return Stats()
         }
-        
-        let cutoff = Date().addingTimeInterval(-Double(hours * 3600))
+
+        return analyze(content: content, now: Date(), hours: hours)
+    }
+
+    static func analyze(content: String, now: Date, hours: Int = 24) -> Stats {
+        let cutoff = now.addingTimeInterval(-Double(hours * 3600))
         let isoFormatter = ISO8601DateFormatter()
-        
+
         var total = 0, success = 0
         var errors: [String: Int] = [:]
         var whisperTimes: [Int] = []
         var polishTimes: [Int] = []
-        
+        var totalTimes: [Int] = []
+
         for line in content.components(separatedBy: "\n") {
             guard !line.isEmpty,
                   let data = line.data(using: .utf8),
@@ -79,7 +97,7 @@ enum MetricsLogger {
                   let ts = dict["t"] as? String,
                   let date = isoFormatter.date(from: ts),
                   date >= cutoff else { continue }
-            
+
             total += 1
             if dict["ok"] as? Bool == true {
                 success += 1
@@ -89,11 +107,20 @@ enum MetricsLogger {
             }
             if let wt = dict["whisper_ms"] as? Int, wt > 0 { whisperTimes.append(wt) }
             if let pt = dict["polish_ms"] as? Int, pt > 0 { polishTimes.append(pt) }
+            if let tt = dict["total_ms"] as? Int, tt > 0 { totalTimes.append(tt) }
         }
-        
+
         let avgW = whisperTimes.isEmpty ? 0 : whisperTimes.reduce(0, +) / whisperTimes.count
         let avgP = polishTimes.isEmpty ? 0 : polishTimes.reduce(0, +) / polishTimes.count
-        
-        return (total, success, errors, avgW, avgP)
+        let avgT = totalTimes.isEmpty ? 0 : totalTimes.reduce(0, +) / totalTimes.count
+
+        return Stats(
+            total: total,
+            success: success,
+            errors: errors,
+            avgWhisperMs: avgW,
+            avgPolishMs: avgP,
+            avgTotalMs: avgT
+        )
     }
 }

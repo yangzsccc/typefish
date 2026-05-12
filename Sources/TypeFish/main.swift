@@ -15,6 +15,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Show in Dock so user can find and restart the app easily
         NSApp.setActivationPolicy(.regular)
+        NSApp.mainMenu = ApplicationMenuFactory.makeMainMenu()
         
         // Initialize state
         state = AppState()

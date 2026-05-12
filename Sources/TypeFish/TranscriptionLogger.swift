@@ -3,6 +3,35 @@ import Foundation
 /// Logs all transcription results for offline analysis and prompt evolution.
 /// Saves audio files + metadata to ~/.config/typefish/logs/
 enum TranscriptionLogger {
+    struct HistoryEntry: Equatable {
+        let timestamp: String
+        let mode: String
+        let whisperRaw: String
+        let polished: String
+        let whisperModel: String
+        let polisherModel: String
+        let audioFile: String
+        let uploadFile: String
+        let fieldContext: String
+
+        var displayMode: String {
+            switch mode {
+            case "command": return "Command"
+            case "translate": return "Translate"
+            default: return "Dictation"
+            }
+        }
+
+        var preview: String {
+            let primary = polished.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !primary.isEmpty { return primary }
+            return whisperRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        var contextPreview: String {
+            fieldContext.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
     
     private static let logsDir: URL = {
         let dir = FileManager.default.homeDirectoryForCurrentUser
@@ -20,6 +49,41 @@ enum TranscriptionLogger {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()
+
+    static func recentHistory(limit: Int = 50) -> [HistoryEntry] {
+        guard let content = try? String(contentsOf: logFile, encoding: .utf8) else { return [] }
+        return parseHistory(from: content, limit: limit)
+    }
+
+    static func parseHistory(from content: String, limit: Int) -> [HistoryEntry] {
+        let entries = content
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .compactMap { parseHistoryLine(String($0)) }
+            .sorted { $0.timestamp > $1.timestamp }
+
+        guard limit > 0 else { return [] }
+        return Array(entries.prefix(limit))
+    }
+
+    private static func parseHistoryLine(_ line: String) -> HistoryEntry? {
+        guard let data = line.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let timestamp = json["timestamp"] as? String else {
+            return nil
+        }
+
+        return HistoryEntry(
+            timestamp: timestamp,
+            mode: json["mode"] as? String ?? "transcribe",
+            whisperRaw: json["whisper_raw"] as? String ?? "",
+            polished: json["polished"] as? String ?? "",
+            whisperModel: json["whisper_model"] as? String ?? "",
+            polisherModel: json["polisher_model"] as? String ?? "",
+            audioFile: json["audio_file"] as? String ?? "",
+            uploadFile: json["upload_file"] as? String ?? "",
+            fieldContext: json["field_context"] as? String ?? ""
+        )
+    }
     
     /// Log a transcription result and preserve the audio file
     static func log(

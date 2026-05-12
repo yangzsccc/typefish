@@ -336,6 +336,7 @@ class AppState: ObservableObject {
 
         let whisperCallback: (String) -> Void = { [weak self] rawText in
             guard let self = self else { return }
+            metrics.whisperTimeMs = Int((CFAbsoluteTimeGetCurrent() - pipelineStartTime) * 1000)
 
             guard !rawText.isEmpty else {
                 metrics.success = false
@@ -356,6 +357,10 @@ class AppState: ObservableObject {
             // Check for known Whisper hallucinations
             if TextPolisher.isHallucination(rawText) {
                 Log.info("🔇 Whisper hallucination detected: \(rawText.prefix(50))...")
+                metrics.success = false
+                metrics.errorType = "hallucination"
+                metrics.totalTimeMs = Int((CFAbsoluteTimeGetCurrent() - pipelineStartTime) * 1000)
+                MetricsLogger.log(metrics)
                 DispatchQueue.main.async {
                     self.isProcessing = false
                     self.statusText = "🔇 No speech detected"
@@ -387,12 +392,21 @@ class AppState: ObservableObject {
                     }
                 }
 
+                let commandStartTime = CFAbsoluteTimeGetCurrent()
                 AICommand.process(
                     instruction: correctedText,
                     selectedText: capturedSelectedText,
                     fieldContext: fieldContext,
                     apiKey: apiKey
                 ) { result in
+                    metrics.polishTimeMs = Int((CFAbsoluteTimeGetCurrent() - commandStartTime) * 1000)
+                    metrics.totalTimeMs = Int((CFAbsoluteTimeGetCurrent() - pipelineStartTime) * 1000)
+                    metrics.success = result?.isEmpty == false
+                    if result?.isEmpty != false {
+                        metrics.errorType = "command_failed"
+                    }
+                    MetricsLogger.log(metrics)
+
                     DispatchQueue.main.async {
                         guard let generated = result, !generated.isEmpty else {
                             self.isProcessing = false
@@ -463,6 +477,7 @@ class AppState: ObservableObject {
             }
 
             // Polish the transcript
+            let polishStartTime = CFAbsoluteTimeGetCurrent()
             TextPolisher.polish(
                 text: correctedText,
                 apiKey: apiKey,
@@ -473,10 +488,15 @@ class AppState: ObservableObject {
                     // Apply reverse replacements AFTER polishing
                     // Catches cases where polisher translates English to Chinese
                     let finalText = self.dictionary.applyReplacements(polishedText)
+                    metrics.polishTimeMs = Int((CFAbsoluteTimeGetCurrent() - polishStartTime) * 1000)
+                    metrics.totalTimeMs = Int((CFAbsoluteTimeGetCurrent() - pipelineStartTime) * 1000)
 
                     // Safety: don't paste empty text
                     guard !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                         Log.info("⚠️ Polished text was empty, skipping paste")
+                        metrics.success = false
+                        metrics.errorType = "empty_polish"
+                        MetricsLogger.log(metrics)
                         self.isProcessing = false
                         self.statusText = "🔇 No speech detected"
                         self.onStateChange?()
@@ -486,6 +506,8 @@ class AppState: ObservableObject {
 
                     // Try to paste to cursor
                     let pasted = PasteService.paste(finalText)
+                    metrics.success = true
+                    MetricsLogger.log(metrics)
 
                     // Record successful transcription for style learning
                     StyleLearner.shared.recordSuccess(

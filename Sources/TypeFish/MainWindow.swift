@@ -1,5 +1,48 @@
 import AppKit
 import AVFoundation
+import ApplicationServices
+
+enum MainWindowSection: Int, CaseIterable {
+    case home = 0
+    case history = 1
+    case dictionary = 2
+    case modes = 3
+    case diagnostics = 4
+    case settings = 5
+
+    var title: String {
+        switch self {
+        case .home: return "Home"
+        case .history: return "History"
+        case .dictionary: return "Dictionary"
+        case .modes: return "Modes"
+        case .diagnostics: return "Diagnostics"
+        case .settings: return "Settings"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .home: return "Daily dictation, recovery, and setup at a glance"
+        case .history: return "Recent transcripts, raw text, and paste recovery"
+        case .dictionary: return "Names, vocabulary, replacements, and learned corrections"
+        case .modes: return "Dictation, translation, and AI command workflows"
+        case .diagnostics: return "Reliability, latency, permissions, and recovery"
+        case .settings: return "Microphone, compression, maintenance, and updates"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .home: return "waveform"
+        case .history: return "clock.arrow.circlepath"
+        case .dictionary: return "book.closed"
+        case .modes: return "sparkles"
+        case .diagnostics: return "gauge.with.dots.needle.67percent"
+        case .settings: return "slider.horizontal.3"
+        }
+    }
+}
 
 struct DictionaryColumnLayout {
     static let minimumWrongWidth: CGFloat = 200
@@ -76,10 +119,17 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private var selectedSectionIndex = 0
     private var contentTitleLabel: NSTextField?
     private var contentSubtitleLabel: NSTextField?
+    private var setupSummaryLabel: NSTextField?
+    private var lastResultLabel: NSTextField?
+    private var diagnosticsSummaryLabel: NSTextField?
+    private var latencySummaryLabel: NSTextField?
+    private var permissionSummaryLabel: NSTextField?
     private var dictionarySegment: NSSegmentedControl?
     private var dictionarySearch: NSSearchField?
     private var dictionaryTable: NSTableView?
     private var dictionaryRows: [DictionaryRow] = []
+    private var historyTable: NSTableView?
+    private var historyRows: [TranscriptionLogger.HistoryEntry] = []
     private var loggedAutoCorrectionKeys: Set<String> = []
 
     private var addButton: NSButton?
@@ -102,7 +152,7 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         }
 
         let w = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 900, height: 610),
+            contentRect: NSRect(x: 0, y: 0, width: 980, height: 660),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -119,9 +169,9 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         let root = NSView(frame: w.contentView!.bounds)
         root.autoresizingMask = [.width, .height]
         root.wantsLayer = true
-        root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        root.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.92).cgColor
 
-        let sidebarWidth: CGFloat = 190
+        let sidebarWidth: CGFloat = 206
         let sidebar = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: sidebarWidth, height: root.bounds.height))
         sidebar.autoresizingMask = [.height]
         sidebar.material = .sidebar
@@ -151,13 +201,18 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         content.addSubview(subtitle)
         self.contentSubtitleLabel = subtitle
 
+        refreshLoggedAutoCorrectionKeys()
+        refreshHistory()
+
         let tabs = NSTabView(frame: NSRect(x: 24, y: 22, width: content.bounds.width - 48, height: content.bounds.height - 118))
         tabs.autoresizingMask = [.width, .height]
         tabs.tabViewType = .noTabsNoBorder
-        tabs.addTabViewItem(tabItem(label: "Dashboard", view: dashboardView(frame: tabs.bounds)))
-        tabs.addTabViewItem(tabItem(label: "Dictionary", view: dictionaryView(frame: tabs.bounds)))
-        tabs.addTabViewItem(tabItem(label: "Settings", view: settingsView(frame: tabs.bounds)))
-        tabs.addTabViewItem(tabItem(label: "Learning", view: learningView(frame: tabs.bounds)))
+        tabs.addTabViewItem(tabItem(label: MainWindowSection.home.title, view: dashboardView(frame: tabs.bounds)))
+        tabs.addTabViewItem(tabItem(label: MainWindowSection.history.title, view: historyView(frame: tabs.bounds)))
+        tabs.addTabViewItem(tabItem(label: MainWindowSection.dictionary.title, view: dictionaryView(frame: tabs.bounds)))
+        tabs.addTabViewItem(tabItem(label: MainWindowSection.modes.title, view: modesView(frame: tabs.bounds)))
+        tabs.addTabViewItem(tabItem(label: MainWindowSection.diagnostics.title, view: diagnosticsView(frame: tabs.bounds)))
+        tabs.addTabViewItem(tabItem(label: MainWindowSection.settings.title, view: settingsView(frame: tabs.bounds)))
         content.addSubview(tabs)
         self.mainTabs = tabs
         updateNavigationSelection()
@@ -166,7 +221,6 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         w.contentView = root
         self.window = w
 
-        refreshLoggedAutoCorrectionKeys()
         refreshDictionaryTable()
         refreshPopups()
         updateStatus()
@@ -180,6 +234,7 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
         if window?.isVisible == true {
             refreshLoggedAutoCorrectionKeys()
+            refreshHistory()
             refreshDictionaryTable()
             refreshPopups()
         }
@@ -209,6 +264,11 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         compressionSummaryLabel?.stringValue = AppState.compressionTitle(for: state.config.audioCompressionBitrate)
         dashboardLearningSummaryLabel?.stringValue = learningSummaryText()
         learningSummaryLabel?.stringValue = learningSummaryText()
+        setupSummaryLabel?.stringValue = setupSummaryText()
+        lastResultLabel?.stringValue = lastResultSummaryText()
+        diagnosticsSummaryLabel?.stringValue = diagnosticsSummaryText()
+        latencySummaryLabel?.stringValue = latencySummaryText()
+        permissionSummaryLabel?.stringValue = setupSummaryText()
         updateContentHeader()
     }
 
@@ -247,17 +307,10 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         version.autoresizingMask = [.minYMargin]
         sidebar.addSubview(version)
 
-        let navItems = [
-            ("Dashboard", "waveform"),
-            ("Dictionary", "book.closed"),
-            ("Settings", "slider.horizontal.3"),
-            ("Learning", "sparkles")
-        ]
-
         navButtons = []
-        for (index, item) in navItems.enumerated() {
-            let button = makeNavButton(title: item.0, symbol: item.1, index: index)
-            button.frame = NSRect(x: 12, y: sidebar.bounds.height - 126 - CGFloat(index * 42), width: sidebar.bounds.width - 24, height: 34)
+        for section in MainWindowSection.allCases {
+            let button = makeNavButton(title: section.title, symbol: section.symbolName, index: section.rawValue)
+            button.frame = NSRect(x: 12, y: sidebar.bounds.height - 126 - CGFloat(section.rawValue * 42), width: sidebar.bounds.width - 24, height: 34)
             button.autoresizingMask = [.width, .minYMargin]
             sidebar.addSubview(button)
             navButtons.append(button)
@@ -319,27 +372,28 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     private func sectionTitle(for index: Int) -> String {
-        switch index {
-        case 1: return "Dictionary"
-        case 2: return "Settings"
-        case 3: return "Learning"
-        default: return "Dashboard"
-        }
+        MainWindowSection(rawValue: index)?.title ?? MainWindowSection.home.title
     }
 
     private func sectionSubtitle(for index: Int) -> String {
-        switch index {
-        case 1:
+        guard let section = MainWindowSection(rawValue: index) else {
+            return MainWindowSection.home.subtitle
+        }
+
+        switch section {
+        case .dictionary:
             return dictionarySummaryText()
-        case 2:
+        case .settings:
             guard let state = state else { return "System Default" }
             let microphone = state.config.preferredMicrophone ?? "System Default"
             let compression = AppState.compressionTitle(for: state.config.audioCompressionBitrate)
             return "\(microphone) · \(compression)"
-        case 3:
-            return learningSummaryText()
+        case .diagnostics:
+            return diagnosticsSummaryText()
+        case .history:
+            return lastResultSummaryText()
         default:
-            return healthStatsText()
+            return section.subtitle
         }
     }
 
@@ -347,53 +401,89 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         let view = NSView(frame: frame)
         view.autoresizingMask = [.width, .height]
 
-        let topHeight: CGFloat = 92
+        let topHeight: CGFloat = 124
         let topY = frame.height - topHeight - 22
         let statusPanel = surface(frame: NSRect(x: 0, y: topY, width: frame.width, height: topHeight))
         statusPanel.autoresizingMask = [.width, .minYMargin]
         view.addSubview(statusPanel)
 
-        addSectionTitle("Status", to: statusPanel, x: 20, y: 56)
+        addSectionTitle("TypeFish", to: statusPanel, x: 22, y: 84)
         let status = valueLabel("Ready", size: 26, weight: .semibold)
         status.textColor = .systemGreen
-        status.frame = NSRect(x: 20, y: 20, width: 260, height: 34)
+        status.frame = NSRect(x: 22, y: 48, width: 280, height: 34)
         statusPanel.addSubview(status)
         self.statusLabel = status
 
-        let healthX = min(frame.width * 0.52, 340)
-        addSectionTitle("Health", to: statusPanel, x: healthX, y: 56)
+        let setup = valueLabel(setupSummaryText(), size: 12, weight: .regular)
+        setup.textColor = .secondaryLabelColor
+        setup.frame = NSRect(x: 22, y: 22, width: 360, height: 18)
+        setup.autoresizingMask = [.width]
+        statusPanel.addSubview(setup)
+        self.setupSummaryLabel = setup
+
+        let healthX = min(frame.width * 0.50, 420)
+        addSectionTitle("Reliability", to: statusPanel, x: healthX, y: 84)
         let health = valueLabel(healthStatsText(), size: 12, weight: .regular)
         health.textColor = .secondaryLabelColor
-        health.frame = NSRect(x: healthX, y: 24, width: statusPanel.bounds.width - healthX - 20, height: 22)
+        health.frame = NSRect(x: healthX, y: 58, width: statusPanel.bounds.width - healthX - 22, height: 20)
         health.autoresizingMask = [.width]
         statusPanel.addSubview(health)
         self.healthLabel = health
 
+        addSectionTitle("Last Result", to: statusPanel, x: healthX, y: 34)
+        let lastResult = valueLabel(lastResultSummaryText(), size: 12, weight: .regular)
+        lastResult.textColor = .labelColor
+        lastResult.frame = NSRect(x: healthX, y: 14, width: statusPanel.bounds.width - healthX - 22, height: 20)
+        lastResult.autoresizingMask = [.width]
+        statusPanel.addSubview(lastResult)
+        self.lastResultLabel = lastResult
+
         let bodyHeight = frame.height - topHeight - 60
-        let leftWidth = min(frame.width * 0.45, 300)
+        let leftWidth = min(frame.width * 0.34, 280)
+        let middleWidth = max(min(frame.width * 0.34, 300), 250)
         let rightX = leftWidth + 20
-        let rightWidth = max(frame.width - rightX, 280)
+        let finalX = rightX + middleWidth + 20
+        let rightWidth = max(frame.width - finalX, 250)
 
-        let shortcutsPanel = surface(frame: NSRect(x: 0, y: 22, width: leftWidth, height: bodyHeight))
-        shortcutsPanel.autoresizingMask = [.height, .maxXMargin]
-        view.addSubview(shortcutsPanel)
+        let setupPanel = surface(frame: NSRect(x: 0, y: 22, width: leftWidth, height: bodyHeight))
+        setupPanel.autoresizingMask = [.height, .maxXMargin]
+        view.addSubview(setupPanel)
 
-        addSectionTitle("Shortcuts", to: shortcutsPanel, x: 20, y: shortcutsPanel.bounds.height - 36)
-        let shortcuts = [
-            ("⌥ Space", "Toggle Recording"),
-            ("⌃⌥ Space", "Translate to English"),
-            ("⌃⌥⌘ Space", "AI Command"),
-            ("Esc", "Cancel Recording")
-        ]
-        for (index, item) in shortcuts.enumerated() {
-            addKeyValue(item.0, item.1, to: shortcutsPanel, x: 20, y: shortcutsPanel.bounds.height - 76 - CGFloat(index * 42))
+        addSectionTitle("Setup", to: setupPanel, x: 20, y: setupPanel.bounds.height - 36)
+        let setupRows = setupRows()
+        for (index, row) in setupRows.enumerated() {
+            addStatusRow(row.title, row.value, ok: row.ok, to: setupPanel, x: 20, y: setupPanel.bounds.height - 78 - CGFloat(index * 46))
         }
 
-        let detailsPanel = surface(frame: NSRect(x: rightX, y: 22, width: rightWidth, height: bodyHeight))
+        let recoveryPanel = surface(frame: NSRect(x: rightX, y: 22, width: middleWidth, height: bodyHeight))
+        recoveryPanel.autoresizingMask = [.height]
+        view.addSubview(recoveryPanel)
+
+        addSectionTitle("Recovery", to: recoveryPanel, x: 20, y: recoveryPanel.bounds.height - 36)
+        _ = addInfoRow("Recent output", lastResultSummaryText(), to: recoveryPanel, x: 20, y: recoveryPanel.bounds.height - 84)
+        let copy = NSButton(title: "Copy Last Result", target: self, action: #selector(copyLastResult))
+        copy.frame = NSRect(x: 20, y: recoveryPanel.bounds.height - 142, width: recoveryPanel.bounds.width - 40, height: 32)
+        copy.autoresizingMask = [.width, .minYMargin]
+        styleActionButton(copy, symbol: "doc.on.doc", prominent: true)
+        recoveryPanel.addSubview(copy)
+
+        let paste = NSButton(title: "Paste Last Result Again", target: self, action: #selector(pasteLastResult))
+        paste.frame = NSRect(x: 20, y: recoveryPanel.bounds.height - 184, width: recoveryPanel.bounds.width - 40, height: 32)
+        paste.autoresizingMask = [.width, .minYMargin]
+        styleActionButton(paste, symbol: "arrow.turn.down.left")
+        recoveryPanel.addSubview(paste)
+
+        let openHistory = NSButton(title: "Open History", target: self, action: #selector(showHistory))
+        openHistory.frame = NSRect(x: 20, y: recoveryPanel.bounds.height - 226, width: recoveryPanel.bounds.width - 40, height: 32)
+        openHistory.autoresizingMask = [.width, .minYMargin]
+        styleActionButton(openHistory, symbol: "clock.arrow.circlepath")
+        recoveryPanel.addSubview(openHistory)
+
+        let detailsPanel = surface(frame: NSRect(x: finalX, y: 22, width: rightWidth, height: bodyHeight))
         detailsPanel.autoresizingMask = [.width, .height]
         view.addSubview(detailsPanel)
 
-        addSectionTitle("Details", to: detailsPanel, x: 20, y: detailsPanel.bounds.height - 36)
+        addSectionTitle("Daily Controls", to: detailsPanel, x: 20, y: detailsPanel.bounds.height - 36)
         let dict = addInfoRow("Dictionary", dictionarySummaryText(), to: detailsPanel, x: 20, y: detailsPanel.bounds.height - 84)
         self.dictSummaryLabel = dict
 
@@ -408,6 +498,206 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         addDivider(to: detailsPanel, x: 20, y: detailsPanel.bounds.height - 256)
         let learning = addInfoRow("Learning", learningSummaryText(), to: detailsPanel, x: 20, y: detailsPanel.bounds.height - 306)
         self.dashboardLearningSummaryLabel = learning
+
+        return view
+    }
+
+    private func historyView(frame: NSRect) -> NSView {
+        let view = NSView(frame: frame)
+        view.autoresizingMask = [.width, .height]
+
+        let actionsPanel = surface(frame: NSRect(x: 0, y: frame.height - 96, width: frame.width, height: 74))
+        actionsPanel.autoresizingMask = [.width, .minYMargin]
+        view.addSubview(actionsPanel)
+
+        addSectionTitle("Recent Results", to: actionsPanel, x: 20, y: 42)
+        let summary = valueLabel(lastResultSummaryText(), size: 13, weight: .regular)
+        summary.textColor = .secondaryLabelColor
+        summary.frame = NSRect(x: 20, y: 18, width: actionsPanel.bounds.width - 350, height: 20)
+        summary.autoresizingMask = [.width]
+        actionsPanel.addSubview(summary)
+        self.lastResultLabel = summary
+
+        let copy = NSButton(title: "Copy Last", target: self, action: #selector(copyLastResult))
+        copy.frame = NSRect(x: actionsPanel.bounds.width - 324, y: 22, width: 104, height: 30)
+        copy.autoresizingMask = [.minXMargin]
+        styleActionButton(copy, symbol: "doc.on.doc")
+        actionsPanel.addSubview(copy)
+
+        let paste = NSButton(title: "Paste Again", target: self, action: #selector(pasteLastResult))
+        paste.frame = NSRect(x: actionsPanel.bounds.width - 212, y: 22, width: 110, height: 30)
+        paste.autoresizingMask = [.minXMargin]
+        styleActionButton(paste, symbol: "arrow.turn.down.left")
+        actionsPanel.addSubview(paste)
+
+        let refresh = NSButton(title: "Refresh", target: self, action: #selector(refreshHistoryAction))
+        refresh.frame = NSRect(x: actionsPanel.bounds.width - 94, y: 22, width: 84, height: 30)
+        refresh.autoresizingMask = [.minXMargin]
+        styleActionButton(refresh, symbol: "arrow.clockwise")
+        actionsPanel.addSubview(refresh)
+
+        let tableSurface = surface(frame: NSRect(x: 0, y: 22, width: frame.width, height: frame.height - 140))
+        tableSurface.autoresizingMask = [.width, .height]
+        view.addSubview(tableSurface)
+
+        let scroll = NSScrollView(frame: NSRect(x: 1, y: 1, width: tableSurface.bounds.width - 2, height: tableSurface.bounds.height - 2))
+        scroll.autoresizingMask = [.width, .height]
+        scroll.borderType = .noBorder
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+
+        let table = NSTableView(frame: scroll.bounds)
+        table.usesAlternatingRowBackgroundColors = false
+        table.backgroundColor = .clear
+        table.rowHeight = 42
+        table.gridStyleMask = []
+        table.intercellSpacing = NSSize(width: 0, height: 0)
+        table.delegate = self
+        table.dataSource = self
+        table.allowsMultipleSelection = false
+
+        let timeColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("historyTime"))
+        timeColumn.title = "Time"
+        timeColumn.width = 148
+        table.addTableColumn(timeColumn)
+
+        let modeColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("historyMode"))
+        modeColumn.title = "Mode"
+        modeColumn.width = 92
+        table.addTableColumn(modeColumn)
+
+        let textColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("historyText"))
+        textColumn.title = "Result"
+        textColumn.width = max(frame.width - 430, 260)
+        table.addTableColumn(textColumn)
+
+        let modelColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("historyModel"))
+        modelColumn.title = "Model"
+        modelColumn.width = 178
+        table.addTableColumn(modelColumn)
+
+        scroll.documentView = table
+        tableSurface.addSubview(scroll)
+        self.historyTable = table
+
+        refreshHistory()
+        return view
+    }
+
+    private func modesView(frame: NSRect) -> NSView {
+        let view = NSView(frame: frame)
+        view.autoresizingMask = [.width, .height]
+
+        let columns: CGFloat = 2
+        let gap: CGFloat = 18
+        let cardWidth = floor((frame.width - gap) / columns)
+        let cardHeight: CGFloat = 142
+        let modes = [
+            ("Default Dictation", "Option Space", "Light cleanup, original wording, bilingual text preserved.", "waveform", NSColor.systemBlue),
+            ("Translate", "Control Option Space", "Speak any language and paste English output.", "globe", NSColor.systemGreen),
+            ("AI Command", "Control Option Command Space", "Generate or transform selected text with a voice instruction.", "sparkles", NSColor.systemPurple),
+            ("Recovery", "History", "Copy, retry manually, or paste the last successful result again.", "clock.arrow.circlepath", NSColor.systemOrange)
+        ]
+
+        for (index, mode) in modes.enumerated() {
+            let col = CGFloat(index % 2)
+            let row = CGFloat(index / 2)
+            let x = col * (cardWidth + gap)
+            let y = frame.height - 22 - cardHeight - row * (cardHeight + gap)
+            let card = surface(frame: NSRect(x: x, y: y, width: cardWidth, height: cardHeight))
+            card.autoresizingMask = [.width, .minYMargin]
+            view.addSubview(card)
+
+            let icon = NSImageView(frame: NSRect(x: 20, y: cardHeight - 58, width: 28, height: 28))
+            icon.image = NSImage(systemSymbolName: mode.3, accessibilityDescription: mode.0)
+            icon.contentTintColor = mode.4
+            card.addSubview(icon)
+
+            let title = valueLabel(mode.0, size: 16, weight: .semibold)
+            title.frame = NSRect(x: 60, y: cardHeight - 55, width: cardWidth - 82, height: 22)
+            title.autoresizingMask = [.width]
+            card.addSubview(title)
+
+            let shortcut = valueLabel(mode.1, size: 12, weight: .medium)
+            shortcut.textColor = mode.4
+            shortcut.frame = NSRect(x: 60, y: cardHeight - 78, width: cardWidth - 82, height: 18)
+            shortcut.autoresizingMask = [.width]
+            card.addSubview(shortcut)
+
+            let desc = valueLabel(mode.2, size: 13, weight: .regular)
+            desc.textColor = .secondaryLabelColor
+            desc.lineBreakMode = .byWordWrapping
+            desc.frame = NSRect(x: 20, y: 22, width: cardWidth - 40, height: 42)
+            desc.autoresizingMask = [.width]
+            card.addSubview(desc)
+        }
+
+        return view
+    }
+
+    private func diagnosticsView(frame: NSRect) -> NSView {
+        let view = NSView(frame: frame)
+        view.autoresizingMask = [.width, .height]
+
+        let stats = MetricsLogger.recentStats(hours: 24)
+        let topHeight: CGFloat = 116
+        let cardWidth = floor((frame.width - 36) / 3)
+        let tiles = [
+            ("Success", stats.total == 0 ? "No data" : "\(stats.successRate)%", diagnosticsSummaryText(), NSColor.systemGreen),
+            ("Latency", stats.avgTotalMs == 0 ? "No data" : "\(stats.avgTotalMs)ms", latencySummaryText(), NSColor.systemBlue),
+            ("Setup", setupRows().allSatisfy { $0.ok } ? "Ready" : "Needs attention", setupSummaryText(), NSColor.systemOrange)
+        ]
+
+        for (index, tile) in tiles.enumerated() {
+            let x = CGFloat(index) * (cardWidth + 18)
+            let card = surface(frame: NSRect(x: x, y: frame.height - topHeight - 22, width: cardWidth, height: topHeight))
+            card.autoresizingMask = [.width, .minYMargin]
+            view.addSubview(card)
+            addSectionTitle(tile.0, to: card, x: 18, y: 78)
+            let value = valueLabel(tile.1, size: 24, weight: .semibold)
+            value.textColor = tile.3
+            value.frame = NSRect(x: 18, y: 42, width: cardWidth - 36, height: 30)
+            value.autoresizingMask = [.width]
+            card.addSubview(value)
+            let detail = valueLabel(tile.2, size: 12, weight: .regular)
+            detail.textColor = .secondaryLabelColor
+            detail.frame = NSRect(x: 18, y: 18, width: cardWidth - 36, height: 18)
+            detail.autoresizingMask = [.width]
+            card.addSubview(detail)
+            if index == 0 { self.diagnosticsSummaryLabel = detail }
+            if index == 1 { self.latencySummaryLabel = detail }
+            if index == 2 { self.permissionSummaryLabel = detail }
+        }
+
+        let detailsPanel = surface(frame: NSRect(x: 0, y: 22, width: frame.width, height: frame.height - topHeight - 64))
+        detailsPanel.autoresizingMask = [.width, .height]
+        view.addSubview(detailsPanel)
+
+        addSectionTitle("Checks", to: detailsPanel, x: 20, y: detailsPanel.bounds.height - 36)
+        let rows = setupRows()
+        for (index, row) in rows.enumerated() {
+            addStatusRow(row.title, row.value, ok: row.ok, to: detailsPanel, x: 20, y: detailsPanel.bounds.height - 78 - CGFloat(index * 44))
+        }
+
+        addSectionTitle("Recovery", to: detailsPanel, x: max(detailsPanel.bounds.width * 0.52, 340), y: detailsPanel.bounds.height - 36)
+        let recoveryX = max(detailsPanel.bounds.width * 0.52, 340)
+        let copy = NSButton(title: "Copy Last Result", target: self, action: #selector(copyLastResult))
+        copy.frame = NSRect(x: recoveryX, y: detailsPanel.bounds.height - 86, width: 180, height: 32)
+        copy.autoresizingMask = [.minXMargin, .minYMargin]
+        styleActionButton(copy, symbol: "doc.on.doc", prominent: true)
+        detailsPanel.addSubview(copy)
+
+        let paste = NSButton(title: "Paste Last Result", target: self, action: #selector(pasteLastResult))
+        paste.frame = NSRect(x: recoveryX, y: detailsPanel.bounds.height - 128, width: 180, height: 32)
+        paste.autoresizingMask = [.minXMargin, .minYMargin]
+        styleActionButton(paste, symbol: "arrow.turn.down.left")
+        detailsPanel.addSubview(paste)
+
+        let logs = NSButton(title: "Open Logs Folder", target: self, action: #selector(openLogsFolder))
+        logs.frame = NSRect(x: recoveryX, y: detailsPanel.bounds.height - 170, width: 180, height: 32)
+        logs.autoresizingMask = [.minXMargin, .minYMargin]
+        styleActionButton(logs, symbol: "folder")
+        detailsPanel.addSubview(logs)
 
         return view
     }
@@ -624,11 +914,14 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     // MARK: - Dictionary Table
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        dictionaryRows.count
+        if tableView === historyTable {
+            return historyRows.count
+        }
+        return dictionaryRows.count
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard row >= 0, row < dictionaryRows.count, let column = tableColumn else { return nil }
+        guard let column = tableColumn else { return nil }
         let identifier = column.identifier
         let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView ?? NSTableCellView()
         cell.identifier = identifier
@@ -645,6 +938,29 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             cell.textField = textField
         }
 
+        if tableView === historyTable {
+            guard row >= 0, row < historyRows.count else { return nil }
+            let item = historyRows[row]
+            switch identifier.rawValue {
+            case "historyTime":
+                textField.stringValue = displayTimestamp(item.timestamp)
+                textField.textColor = .secondaryLabelColor
+            case "historyMode":
+                textField.stringValue = item.displayMode
+                textField.textColor = modeColor(item.mode)
+            case "historyText":
+                textField.stringValue = item.preview
+                textField.textColor = .labelColor
+            case "historyModel":
+                textField.stringValue = item.polisherModel.isEmpty ? item.whisperModel : item.polisherModel
+                textField.textColor = .tertiaryLabelColor
+            default:
+                textField.stringValue = ""
+            }
+            return cell
+        }
+
+        guard row >= 0, row < dictionaryRows.count else { return nil }
         let item = dictionaryRows[row]
         switch identifier.rawValue {
         case "wrong":
@@ -843,12 +1159,63 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     @objc private func showAutoLearnedCorrections() {
-        selectedSectionIndex = 1
-        mainTabs?.selectTabViewItem(at: 1)
+        selectedSectionIndex = MainWindowSection.dictionary.rawValue
+        mainTabs?.selectTabViewItem(at: MainWindowSection.dictionary.rawValue)
         dictionarySegment?.selectedSegment = DictionaryViewKind.autoLearned.rawValue
         refreshDictionaryTable()
         updateNavigationSelection()
         updateContentHeader()
+    }
+
+    // MARK: - History & Recovery Actions
+
+    @objc private func showHistory() {
+        selectedSectionIndex = MainWindowSection.history.rawValue
+        mainTabs?.selectTabViewItem(at: MainWindowSection.history.rawValue)
+        refreshHistory()
+        updateNavigationSelection()
+        updateContentHeader()
+    }
+
+    @objc private func refreshHistoryAction() {
+        refreshHistory()
+        updateStatus()
+    }
+
+    @objc private func copyLastResult() {
+        guard let text = lastHistoryText() else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+
+    @objc private func pasteLastResult() {
+        guard let text = lastHistoryText() else { return }
+        if !PasteService.paste(text) {
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
+            overlayResult(text)
+        }
+    }
+
+    private func overlayResult(_ text: String) {
+        state?.overlay.showResult(text)
+    }
+
+    private func refreshHistory() {
+        historyRows = TranscriptionLogger.recentHistory(limit: 80)
+        historyTable?.reloadData()
+    }
+
+    private func lastHistoryText() -> String? {
+        let selectedRow = historyTable?.selectedRow ?? -1
+        if selectedRow >= 0, selectedRow < historyRows.count {
+            let text = historyRows[selectedRow].preview
+            return text.isEmpty ? nil : text
+        }
+        guard let text = historyRows.first?.preview, !text.isEmpty else { return nil }
+        return text
     }
 
     // MARK: - Settings Actions
@@ -1017,6 +1384,76 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
     // MARK: - Text Helpers
 
+    private func setupRows() -> [(title: String, value: String, ok: Bool)] {
+        let accessibility = AXIsProcessTrusted()
+        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        let microphone = micStatus == .authorized
+        let apiKey = state?.groqAPIKey != nil
+        let dictionaryLoaded = state?.dictionary != nil
+
+        return [
+            ("Accessibility", accessibility ? "Enabled" : "Open System Settings to allow hotkeys and paste", accessibility),
+            ("Microphone", microphone ? "Enabled" : permissionTitle(for: micStatus), microphone),
+            ("API Key", apiKey ? "Groq key loaded" : "Missing GROQ_API_KEY or ~/.config/typefish/groq_key", apiKey),
+            ("Dictionary", dictionaryLoaded ? dictionarySummaryText() : "No dictionary loaded", dictionaryLoaded)
+        ]
+    }
+
+    private func permissionTitle(for status: AVAuthorizationStatus) -> String {
+        switch status {
+        case .notDetermined: return "Not requested yet"
+        case .restricted: return "Restricted by system policy"
+        case .denied: return "Denied in System Settings"
+        case .authorized: return "Enabled"
+        @unknown default: return "Unknown"
+        }
+    }
+
+    private func setupSummaryText() -> String {
+        let rows = setupRows()
+        let ready = rows.filter { $0.ok }.count
+        return "\(ready)/\(rows.count) setup checks ready"
+    }
+
+    private func lastResultSummaryText() -> String {
+        guard let first = historyRows.first else { return "No saved transcription yet" }
+        let preview = first.preview.replacingOccurrences(of: "\n", with: " ")
+        if preview.count <= 88 { return preview }
+        return String(preview.prefix(88)) + "..."
+    }
+
+    private func diagnosticsSummaryText() -> String {
+        let stats = MetricsLogger.recentStats(hours: 24)
+        if stats.total == 0 { return "No recent pipeline metrics" }
+        return "\(stats.success)/\(stats.total) successful in 24h"
+    }
+
+    private func latencySummaryText() -> String {
+        let stats = MetricsLogger.recentStats(hours: 24)
+        var parts: [String] = []
+        if stats.avgWhisperMs > 0 { parts.append("Whisper \(stats.avgWhisperMs)ms") }
+        if stats.avgPolishMs > 0 { parts.append("Polish \(stats.avgPolishMs)ms") }
+        if stats.avgTotalMs > 0 { parts.append("Total \(stats.avgTotalMs)ms") }
+        return parts.isEmpty ? "No latency samples yet" : parts.joined(separator: " · ")
+    }
+
+    private func displayTimestamp(_ timestamp: String) -> String {
+        let formatter = ISO8601DateFormatter()
+        guard let date = formatter.date(from: timestamp) else { return timestamp }
+        let out = DateFormatter()
+        out.dateStyle = .none
+        out.timeStyle = .short
+        return out.string(from: date)
+    }
+
+    private func modeColor(_ mode: String) -> NSColor {
+        switch mode {
+        case "command": return .systemPurple
+        case "translate": return .systemGreen
+        default: return .controlAccentColor
+        }
+    }
+
     private func dictionarySummaryText() -> String {
         guard let dict = state?.dictionary else { return "No dictionary loaded" }
         return "\(dict.hints.count) hints · \(dict.replacements.count) corrections · \(dict.vocabulary.count) vocabulary"
@@ -1135,5 +1572,24 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         valueLabel.frame = NSRect(x: x + 118, y: y, width: view.bounds.width - x - 138, height: 20)
         valueLabel.autoresizingMask = [.width]
         view.addSubview(valueLabel)
+    }
+
+    private func addStatusRow(_ title: String, _ value: String, ok: Bool, to view: NSView, x: CGFloat, y: CGFloat) {
+        let dot = NSView(frame: NSRect(x: x, y: y + 5, width: 9, height: 9))
+        dot.wantsLayer = true
+        dot.layer?.cornerRadius = 4.5
+        dot.layer?.backgroundColor = (ok ? NSColor.systemGreen : NSColor.systemOrange).cgColor
+        view.addSubview(dot)
+
+        let titleLabel = valueLabel(title, size: 13, weight: .semibold)
+        titleLabel.frame = NSRect(x: x + 18, y: y + 14, width: view.bounds.width - x - 38, height: 20)
+        titleLabel.autoresizingMask = [.width]
+        view.addSubview(titleLabel)
+
+        let detailLabel = valueLabel(value, size: 12, weight: .regular)
+        detailLabel.textColor = .secondaryLabelColor
+        detailLabel.frame = NSRect(x: x + 18, y: y - 4, width: view.bounds.width - x - 38, height: 18)
+        detailLabel.autoresizingMask = [.width]
+        view.addSubview(detailLabel)
     }
 }
