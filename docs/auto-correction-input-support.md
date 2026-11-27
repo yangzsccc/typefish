@@ -63,4 +63,19 @@ For the tested installation of ChatGPT for Mac, the application identifies itsel
 
 After confirming a paste, the learning monitor allows a two-second interruption in Accessibility reads if the original window is still active. A confirmed field or window change, an unsafe caret, or a changed insertion boundary still ends the session. Unit tests cover recovery, expiry, and a fresh field check before saving. A service integration test with a temporary dictionary replayed identical synthetic Mandarin audio and obtained the corrected full name in both the raw transcription and polished output.
 
-The release-mode candidate has independent regression and service coverage. Foreground acceptance on the reported Mac ChatGPT and Apple Notes windows requires an unlocked desktop.
+The release-mode candidate passed its regression and service checks. Foreground testing resumed with the desktop unlocked, as recorded below.
+
+## Version 2.6.2 focus verification on November 27, 2026
+
+On this Mac, pressing Option+Space with a ChatGPT draft focused also switched ChatGPT windows in 2.6.1. The first observed switch occurred about 220 ms after the start shortcut. The stop shortcut changed the focused element again. Groq returned a transcript, but TypeFish could no longer match the original composer for delivery.
+
+With Accessibility permission, TypeFish now handles the Option+Space press and release before the focused app sees them. Holding Space triggers one toggle. Additional modifier combinations pass through to their existing handlers. If macOS denies the shortcut event tap, TypeFish falls back to its Carbon registration and logs that focus protection was unavailable. The status and learning panels cannot become key or main windows. Switching to another application during processing leaves the user there and makes the result available to copy.
+
+| Desktop check | Result |
+| --- | --- |
+| Signed installed app with the physical microphone muted | In both ChatGPT and Mac Notes, one start and one stop were logged. The same field, window and selection persisted throughout, and both recordings measured zero peak RMS. The input setting was restored. |
+| ChatGPT for Mac, unsent draft | A QA build replayed fixed Mandarin audio twice with the normal Option+Space handler and configured Whisper and polish services. Both results appeared at the caret. A crop of the rendered composer showed the test sentence. |
+| Mac Notes, temporary local note | The same procedure kept the note editor focused. A manual change from 刘俊炎 to 刘俊彦 saved the full name. The second raw transcript and visible insertion used 刘俊彦. The test notes were removed and the local Notes account setting was restored. |
+| Deliberate switch during processing | After the user action changed focus from ChatGPT to a TextEdit scratch document, the scratch retained focus and its contents. The clipboard contained the completed dictation. |
+
+The service tests used isolated dictionaries and substituted a fixed audio file at the recorder boundary. The signed application tests used the normal microphone recorder and both hotkey transitions. The desktop-enabled Swift suite ran 86 tests with 85 passes, one skipped historical audio fixture and zero failures. These are macOS results. iPhone Notes was outside the test environment.

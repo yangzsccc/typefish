@@ -238,9 +238,9 @@ final class PostPasteCaptureTests: XCTestCase {
             protectedContent: false,
             secureEventInputEnabled: false
         ))
-        XCTAssertTrue(PasteService.shouldActivateSavedApp(frontmostPID: nil, targetPID: 10))
-        XCTAssertTrue(PasteService.shouldActivateSavedApp(frontmostPID: 9, targetPID: 10))
-        XCTAssertFalse(PasteService.shouldActivateSavedApp(frontmostPID: 10, targetPID: 10))
+        XCTAssertFalse(PasteService.isSavedApplicationFrontmost(frontmostPID: nil, targetPID: 10))
+        XCTAssertFalse(PasteService.isSavedApplicationFrontmost(frontmostPID: 9, targetPID: 10))
+        XCTAssertTrue(PasteService.isSavedApplicationFrontmost(frontmostPID: 10, targetPID: 10))
         XCTAssertTrue(PasteService.shouldRestorePasteboard(currentChangeCount: 4, writtenChangeCount: 4))
         XCTAssertFalse(PasteService.shouldRestorePasteboard(currentChangeCount: 5, writtenChangeCount: 4))
         XCTAssertFalse(PasteService.shouldRestorePasteboardAfterConfirmation(

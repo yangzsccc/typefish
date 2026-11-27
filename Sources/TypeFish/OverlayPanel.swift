@@ -1,6 +1,12 @@
 import AppKit
 import QuartzCore
 
+/// Floating feedback windows must never take the keyboard or main-window role.
+final class NonactivatingOverlayPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
 /// A minimal floating indicator at the bottom center of the screen.
 /// Shows animated bars during recording, morphs for processing, then dismisses.
 class OverlayPanel {
@@ -87,13 +93,12 @@ class OverlayPanel {
     private func ensureWindow() {
         if window != nil { return }
         
-        let panel = NSPanel(
+        let panel = NonactivatingOverlayPanel(
             contentRect: NSRect(x: 0, y: 0, width: pillWidth, height: pillHeight),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
-        panel.isFloatingPanel = true
         panel.level = .statusBar
         panel.backgroundColor = .clear
         panel.isOpaque = false
@@ -297,14 +302,13 @@ class OverlayPanel {
         let panelWidth = min(max(textSize.width + undoBtnWidth + padding + 16, 200), 420)
         let panelHeight: CGFloat = 32
         
-        let panel = NSPanel(
+        let panel = NonactivatingOverlayPanel(
             contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
         panel.title = Self.autoLearnWindowTitle
-        panel.isFloatingPanel = true
         panel.level = .screenSaver
         panel.backgroundColor = .clear
         panel.isOpaque = false
@@ -426,13 +430,12 @@ class OverlayPanel {
         let panelWidth = min(max(textSize.width + undoBtnWidth + padding + 16, 200), 420)
         let panelHeight: CGFloat = 32
         
-        let panel = NSPanel(
+        let panel = NonactivatingOverlayPanel(
             contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
-        panel.isFloatingPanel = true
         panel.level = .statusBar
         panel.backgroundColor = .clear
         panel.isOpaque = false
@@ -541,13 +544,12 @@ class OverlayPanel {
         let textHeight = min(max(textSize.height + 8, 24), 200)
         let panelHeight = textHeight + 44  // text + button + padding
         
-        let panel = NSPanel(
+        let panel = NonactivatingOverlayPanel(
             contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
-        panel.isFloatingPanel = true
         panel.level = .statusBar
         panel.backgroundColor = .clear
         panel.isOpaque = false
@@ -629,11 +631,15 @@ class OverlayPanel {
     
     @objc private func resultCopyClicked(_ sender: NSButton) {
         if let text = objc_getAssociatedObject(sender, "resultText") as? String {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
+            Self.copyResult(text, to: .general)
             Log.info("📋 Result copied to clipboard")
         }
         dismissResultWindow()
+    }
+
+    static func copyResult(_ text: String, to pasteboard: NSPasteboard) {
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
     
     private func dismissResultWindow() {

@@ -3,6 +3,28 @@ import XCTest
 @testable import TypeFish
 
 final class OverlayPanelE2ETests: XCTestCase {
+    func testFeedbackPanelCannotBecomeKeyOrMain() {
+        let panel = NonactivatingOverlayPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 200, height: 60),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: true
+        )
+
+        XCTAssertFalse(panel.canBecomeKey)
+        XCTAssertFalse(panel.canBecomeMain)
+        XCTAssertFalse(panel.isFloatingPanel)
+    }
+
+    func testCopyResultKeepsAUsableCopyEntry() {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("TypeFishOverlayCopyTest"))
+        defer { pasteboard.releaseGlobally() }
+
+        OverlayPanel.copyResult("刘俊彦是一只大大的小猪", to: pasteboard)
+
+        XCTAssertEqual(pasteboard.string(forType: .string), "刘俊彦是一只大大的小猪")
+    }
+
     func testAutoLearnOverlayCreatesVisibleWindow() throws {
         guard ProcessInfo.processInfo.environment["TYPEFISH_RUN_E2E"] == "1" else {
             throw XCTSkip("Set TYPEFISH_RUN_E2E=1 to run the overlay E2E test.")

@@ -9,13 +9,24 @@ enum HotkeyEventTapDecision: Equatable {
     case trackAndPassThrough(EditMirrorEvent, triggerEnter: Bool)
 }
 
+enum ToggleHotkeyTapDecision: Equatable {
+    case passThrough
+    case consume
+    case consumeAndLatch
+    case consumeAndToggle
+}
+
 /// Global hotkey manager.
-/// Uses Carbon registered hotkeys for TypeFish shortcuts, and enables a short-lived
-/// CGEvent tap only while EditTracker is observing post-paste corrections.
+/// Claims the dictation shortcut before the focused app handles it. Carbon handles
+/// the other shortcuts. Edit tracking has its own temporary event tap.
 class HotkeyManager {
     
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var toggleEventTap: CFMachPort?
+    private var toggleRunLoopSource: CFRunLoopSource?
+    private var isConsumingToggleKeySequence = false
+    private var hasOrphanedToggleKeyUp = false
     private var hotkeyHandler: EventHandlerRef?
     private var hotkeyRefs: [EventHotKeyRef] = []
     private var globalKeyMonitor: Any?
@@ -24,7 +35,7 @@ class HotkeyManager {
     /// Called when the hotkey is pressed (Option+Space)
     var onToggle: (() -> Void)?
     
-    /// Called when translate hotkey is pressed (Option+Shift+Space)
+    /// Called when translate hotkey is pressed (Control+Option+Space)
     var onTranslateToggle: (() -> Void)?
     
     /// Called when AI command hotkey is pressed (Ctrl+Option+Cmd+Space)
@@ -87,13 +98,14 @@ class HotkeyManager {
             Log.info("✅ Accessibility permission granted")
         }
         
-        installRegisteredHotkeys()
+        let hasActiveToggleTap = startToggleEventTap()
+        installRegisteredHotkeys(registerCarbonToggle: !hasActiveToggleTap)
         startPassiveEscapeMonitor()
 
         Log.info("✅ Hotkey active: Option+Space to toggle recording")
     }
 
-    private func installRegisteredHotkeys() {
+    private func installRegisteredHotkeys(registerCarbonToggle: Bool) {
         guard hotkeyHandler == nil else { return }
 
         var eventType = EventTypeSpec(
@@ -115,9 +127,93 @@ class HotkeyManager {
             return
         }
 
-        registerHotkey(.toggleRecording, modifiers: UInt32(optionKey))
+        if registerCarbonToggle {
+            registerHotkey(.toggleRecording, modifiers: UInt32(optionKey))
+        }
         registerHotkey(.translateToggle, modifiers: UInt32(controlKey | optionKey))
         registerHotkey(.commandToggle, modifiers: UInt32(controlKey | optionKey | cmdKey))
+    }
+
+    /// Consume only the Option+Space key sequence before applications such as ChatGPT
+    /// can interpret it as a window-switching shortcut. All other events pass through.
+    private func startToggleEventTap() -> Bool {
+        guard toggleEventTap == nil else { return true }
+        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+            | CGEventMask(1 << CGEventType.keyUp.rawValue)
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: HotkeyManager.toggleEventTapCallback,
+            userInfo: nil
+        ) else {
+            Log.info("⚠️ Could not create Option+Space suppression tap; using Carbon hotkey fallback.")
+            return false
+        }
+
+        toggleEventTap = tap
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        toggleRunLoopSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        Log.info("Option+Space focus protection active")
+        return true
+    }
+
+    private func stopToggleEventTap() {
+        if let tap = toggleEventTap { CGEvent.tapEnable(tap: tap, enable: false) }
+        if let source = toggleRunLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+        }
+        toggleEventTap = nil
+        toggleRunLoopSource = nil
+        isConsumingToggleKeySequence = false
+        hasOrphanedToggleKeyUp = false
+    }
+
+    static let toggleEventTapCallback: CGEventTapCallBack = { _, type, event, _ in
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let manager = HotkeyManager.shared {
+                if manager.isConsumingToggleKeySequence {
+                    manager.hasOrphanedToggleKeyUp = true
+                    manager.isConsumingToggleKeySequence = false
+                }
+            }
+            if let tap = HotkeyManager.shared?.toggleEventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            return Unmanaged.passUnretained(event)
+        }
+        guard let manager = HotkeyManager.shared else { return Unmanaged.passUnretained(event) }
+        let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        let modifiers = NSEvent.ModifierFlags(rawValue: UInt(event.flags.rawValue))
+            .intersection([.command, .shift, .control, .option, .function])
+        let decision = toggleTapDecision(
+            eventType: type,
+            keyCode: keyCode,
+            modifiers: modifiers,
+            isConsumingSequence: manager.isConsumingToggleKeySequence,
+            hasOrphanedKeyUp: manager.hasOrphanedToggleKeyUp,
+            isAutorepeat: event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+        )
+        switch decision {
+        case .passThrough:
+            return Unmanaged.passUnretained(event)
+        case .consume:
+            if type == .keyUp {
+                manager.isConsumingToggleKeySequence = false
+                manager.hasOrphanedToggleKeyUp = false
+            }
+            return nil
+        case .consumeAndLatch:
+            manager.isConsumingToggleKeySequence = true
+            return nil
+        case .consumeAndToggle:
+            manager.isConsumingToggleKeySequence = true
+            DispatchQueue.main.async { HotkeyManager.shared?.onToggle?() }
+            return nil
+        }
     }
 
     private func registerHotkey(_ hotkey: RegisteredHotkey, modifiers: UInt32) {
@@ -237,15 +333,15 @@ class HotkeyManager {
             if let tap = HotkeyManager.shared?.eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
         
         guard type == .keyDown else {
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
         
         guard let manager = HotkeyManager.shared else {
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
 
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
@@ -264,17 +360,17 @@ class HotkeyManager {
 
         switch decision {
         case .passThrough:
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
 
         case .cancelAndPassThrough:
             DispatchQueue.main.async {
                 HotkeyManager.shared?.onCancel?()
             }
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
 
         case .replayedTrackedEnter:
             manager.isReplayingTrackedEnter = false
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
 
         case .interceptTrackedEnter:
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
@@ -290,7 +386,7 @@ class HotkeyManager {
                 HotkeyManager.shared?.onTrackedKeyEvent?(mirrorEvent)
                 HotkeyManager.shared?.onAnyKeyPress?()
             }
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
     }
 
@@ -314,6 +410,7 @@ class HotkeyManager {
     func stop() {
         isTrackingEdits = false
         stopEditEventTap()
+        stopToggleEventTap()
 
         for ref in hotkeyRefs {
             UnregisterEventHotKey(ref)
@@ -341,6 +438,38 @@ class HotkeyManager {
     }
     
     deinit { stop() }
+
+    static func toggleTapDecisionForTesting(
+        eventType: CGEventType,
+        keyCode: UInt16,
+        modifiers: NSEvent.ModifierFlags,
+        isConsumingSequence: Bool,
+        hasOrphanedKeyUp: Bool = false,
+        isAutorepeat: Bool = false
+    ) -> ToggleHotkeyTapDecision {
+        toggleTapDecision(eventType: eventType, keyCode: keyCode, modifiers: modifiers,
+                          isConsumingSequence: isConsumingSequence,
+                          hasOrphanedKeyUp: hasOrphanedKeyUp,
+                          isAutorepeat: isAutorepeat)
+    }
+
+    private static func toggleTapDecision(
+        eventType: CGEventType,
+        keyCode: UInt16,
+        modifiers: NSEvent.ModifierFlags,
+        isConsumingSequence: Bool,
+        hasOrphanedKeyUp: Bool,
+        isAutorepeat: Bool
+    ) -> ToggleHotkeyTapDecision {
+        if eventType == .keyUp && keyCode == UInt16(kVK_Space) {
+            return isConsumingSequence || hasOrphanedKeyUp ? .consume : .passThrough
+        }
+        guard eventType == .keyDown, keyCode == UInt16(kVK_Space) else { return .passThrough }
+        if isConsumingSequence { return .consume }
+        guard modifiers == [.option] else { return .passThrough }
+        if isAutorepeat { return .consumeAndLatch }
+        return .consumeAndToggle
+    }
 
     private static func characters(from event: CGEvent) -> String {
         var length = 0

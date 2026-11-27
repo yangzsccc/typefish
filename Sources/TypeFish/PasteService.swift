@@ -126,12 +126,12 @@ enum PasteService {
         let writtenChangeCount = pasteboard.changeCount
         
         if hasTextInput, let app = savedApp {
-            if shouldActivateSavedApp(
+            guard isSavedApplicationFrontmost(
                 frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
                 targetPID: app.processIdentifier
-            ) {
-                app.activate()
-                usleep(150_000)
+            ) else {
+                Log.info("Paste skipped: the original app is no longer frontmost; result is on the clipboard")
+                return (false, nil)
             }
 
             let pendingCapture: PendingPasteCapture?
@@ -228,8 +228,8 @@ enum PasteService {
         }
     }
 
-    static func shouldActivateSavedApp(frontmostPID: pid_t?, targetPID: pid_t) -> Bool {
-        frontmostPID != targetPID
+    static func isSavedApplicationFrontmost(frontmostPID: pid_t?, targetPID: pid_t) -> Bool {
+        frontmostPID == targetPID
     }
 
     static func requiresVerifiedTarget(for bundleIdentifier: String?) -> Bool {
@@ -330,10 +330,7 @@ enum PasteService {
     /// Simulate Cmd+Z in the app that received the dictation.
     static func undo() {
         guard let app = savedApp else { return }
-        if NSWorkspace.shared.frontmostApplication?.processIdentifier != app.processIdentifier {
-            app.activate()
-            usleep(50_000)
-        }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else { return }
         _ = postCommandKey(6, to: app)
     }
 }
