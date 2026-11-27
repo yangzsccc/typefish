@@ -30,6 +30,24 @@ final class HistoryDiagnosticsTests: XCTestCase {
         XCTAssertEqual(entries[0].preview, "raw fallback")
     }
 
+    func testLearningEventsJoinByRecordingEvenBeforeRowOrForSameSecond() throws {
+        struct Event: Encodable { let id: UUID; let run: UUID; let result: HistoryLearning }
+        let a = UUID(), b = UUID(), previousRun = UUID()
+        let preference = LearnedSpellingPreference(id: UUID(), phrase: "Typeless", createdAt: "today")
+        let lines = [a, b].map {
+            "{\"timestamp\":\"2026-11-27T10:00:00Z\",\"id\":\"" + $0.uuidString + "\"}"
+        }.joined(separator: "\n")
+        var events = Data()
+        for (id, result) in [(a, HistoryLearning.watching), (b, .watching), (a, .learned(preference))] {
+            events.append(try JSONEncoder().encode(Event(id: id, run: previousRun, result: result)))
+            events.append(0x0a)
+        }
+        let entries = TranscriptionLogger.parseHistory(from: lines, limit: 2, events: events)
+        XCTAssertEqual(entries.map(\.id), [b, a])
+        XCTAssertEqual(entries.map(\.learning), [.noChange, .learned(preference)])
+        XCTAssertEqual(TranscriptionLogger.parseHistory(from: lines, limit: 1, events: events).first?.id, b)
+    }
+
     func testMetricsAnalyzerComputesRecentDiagnostics() throws {
         let now = ISO8601DateFormatter().date(from: "2026-05-12T03:30:00Z")!
         let content = """

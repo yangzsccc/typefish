@@ -101,3 +101,11 @@ In the same Chrome editor and in a dedicated unsent ChatGPT for Mac draft, the s
 The Chrome test changed one character of a name. In ChatGPT, the test selected both given-name characters, typed `junyan`, held the uncommitted `jun yan` for more than two seconds, then chose the visible `俊言` candidate. The isolated dictionary remained empty during composition. Both editors then saved `刘俊言`, showed the learning panel with Undo, and produced `刘俊言` in the next raw transcript and pasted result when the same audio was replayed. A missing candidate observation can still leave a correction unlearned.
 
 The desktop-enabled Swift suite ran 107 tests with 106 passes and one skipped historical microphone fixture.
+
+## Version 2.6.5
+
+A confirmed, localized Han/Latin edit can create a preferred spelling for future dictation. Short single-token substitutions with matching Mandarin and English sound patterns can be learned locally. Other plausible spellings can appear in History for confirmation. Learning adds a spelling hint used by transcription and polishing. Global find-and-replace rules remain a separate dictionary feature.
+
+History associates the learning outcome with the individual recording, including when two dictations finish in the same second. Select the row to confirm a suggested spelling, undo the exact learned entry, or retry retained audio with the current dictionary. Replay opens a result preview. Older recordings still appear, and retry is available while the audio is retained.
+
+Desktop verification used an empty test dictionary for each app and the same Mandarin WAV, injected at the recorder boundary. The production speech service transcribed the baseline as “我们来测试台布斯这个工具”. In ChatGPT for Mac, the tester selected “台布斯”, typed “Typeless” and immediately sent the message. Separate runs exercised Return and clicking the on-screen Send button. In Apple Notes, the tester made the same correction and immediately switched to Finder. Both histories displayed “已记住 · Typeless”. Retrying the original audio returned “Typeless” and Undo removed the corresponding preference.

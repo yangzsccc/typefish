@@ -3,6 +3,16 @@ import ApplicationServices
 @testable import TypeFish
 
 final class PostPasteCaptureTests: XCTestCase {
+    func testSendButtonLabelMustBeAnExactSubmissionControl() {
+        XCTAssertTrue(AccessibilityCapturePolicy.isSendButton(role: "AXButton", labels: ["Send"]))
+        XCTAssertTrue(AccessibilityCapturePolicy.isSendButton(role: "AXButton", labels: ["Send message"]))
+        XCTAssertTrue(AccessibilityCapturePolicy.isSendButton(role: "AXButton", labels: ["发送消息"]))
+        XCTAssertTrue(AccessibilityCapturePolicy.isSendButton(role: "AXButton", labels: ["composer-submit-button"]))
+        XCTAssertFalse(AccessibilityCapturePolicy.isSendButton(role: "AXButton", labels: ["Resend", "New chat"]))
+        XCTAssertFalse(AccessibilityCapturePolicy.isSendButton(role: "AXTextField", labels: ["Send"]))
+        XCTAssertFalse(AccessibilityCapturePolicy.isSendButton(role: "AXButton", labels: ["Attach file"]))
+    }
+
     func testComposerCanShowTheEndOfALongDictationAndRejectHiddenText() {
         let visible = CFRange(location: 60, length: 12)
         XCTAssertTrue(AccessibilityCapturePolicy.includesInsertedCharacter(endingAt: 72, visibleRange: visible))

@@ -109,6 +109,34 @@ final class EditTrackerTests: XCTestCase {
         ))
     }
 
+    func testEditAnalysisGateAllowsAnchoredHanToLatinSpellingCandidate() {
+        let original = "我在测试台布斯的输入体验。"
+        let edited = "我在测试Typeless的输入体验。"
+
+        XCTAssertTrue(EditTracker.shouldAnalyzeEditForTesting(original: original, edited: edited))
+        XCTAssertEqual(
+            EditTracker.shared.validatedTerm("Typeless", original: original, edited: edited),
+            "Typeless"
+        )
+    }
+
+    func testMixedScriptCandidateStillRequiresTheExactEditedTerm() {
+        XCTAssertNil(EditTracker.shared.validatedTerm(
+            "Typefish", original: "我在测试台布斯的输入体验。", edited: "我在测试Typeless的输入体验。"
+        ))
+        XCTAssertFalse(EditTracker.shouldAnalyzeEditForTesting(
+            original: "我在测试台布斯的输入体验。", edited: "我把日历打开了。"
+        ))
+    }
+
+    func testMixedScriptLocalPhoneticMatchKeepsClearCorrectionsAvailableOffline() {
+        XCTAssertTrue(EditTracker.hasHighConfidenceMixedScriptMatchForTesting(wrong: "台布斯", right: "Typeless"))
+        XCTAssertFalse(EditTracker.hasHighConfidenceMixedScriptMatchForTesting(wrong: "台布斯", right: "Calendar"))
+        XCTAssertFalse(EditTracker.hasHighConfidenceMixedScriptMatchForTesting(wrong: "台布斯", right: "Topless"))
+        XCTAssertFalse(EditTracker.hasHighConfidenceMixedScriptMatchForTesting(wrong: "台布斯", right: "T2p3s"))
+        XCTAssertFalse(EditTracker.hasHighConfidenceMixedScriptMatchForTesting(wrong: "台布斯", right: "Please use Typeless"))
+    }
+
     func testEditAnalysisGateRejectsLargeLengthDifference() {
         XCTAssertFalse(EditTracker.shouldAnalyzeEditForTesting(
             original: "Use API for this request.",

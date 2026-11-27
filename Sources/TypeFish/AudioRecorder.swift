@@ -273,7 +273,7 @@ class AudioRecorder {
         
         // Create temp file
         let tempDir = FileManager.default.temporaryDirectory
-        let filename = "typefish_\(Int(Date().timeIntervalSince1970)).wav"
+        let filename = "typefish_\(UUID().uuidString).wav"
         let url = tempDir.appendingPathComponent(filename)
         self.outputURL = url
         

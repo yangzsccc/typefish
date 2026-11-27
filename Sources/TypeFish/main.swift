@@ -51,6 +51,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager.onCancel = { [weak self] in
             self?.state.cancelRecording()
         }
+        EditTracker.shared.configure(hotkeyManager: hotkeyManager)
         hotkeyManager.start()
         
         // Chain main window updates to state changes (MenuBarController already set onStateChange)

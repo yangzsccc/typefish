@@ -25,6 +25,7 @@ class HotkeyManager {
     private var runLoopSource: CFRunLoopSource?
     private var toggleEventTap: CFMachPort?
     private var toggleRunLoopSource: CFRunLoopSource?
+    private(set) var supportsPreDispatchReturnCapture = false
     private var isConsumingToggleKeySequence = false
     private var hasOrphanedToggleKeyUp = false
     private var hotkeyHandler: EventHandlerRef?
@@ -52,6 +53,8 @@ class HotkeyManager {
     
     /// Called when Enter key is pressed (for immediate analysis)
     var onEnterKey: (() -> Void)?
+    var onBeforeReturn: (() -> Void)?
+    var onBeforeSubmitClick: ((CGPoint) -> Void)?
 
     /// Called when Enter is intercepted so EditTracker can snapshot before the draft is sent.
     var onInterceptedEnterKey: (() -> Void)?
@@ -99,6 +102,7 @@ class HotkeyManager {
         }
         
         let hasActiveToggleTap = startToggleEventTap()
+        supportsPreDispatchReturnCapture = hasActiveToggleTap
         installRegisteredHotkeys(registerCarbonToggle: !hasActiveToggleTap)
         startPassiveEscapeMonitor()
 
@@ -140,6 +144,7 @@ class HotkeyManager {
         guard toggleEventTap == nil else { return true }
         let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
             | CGEventMask(1 << CGEventType.keyUp.rawValue)
+            | CGEventMask(1 << CGEventType.leftMouseDown.rawValue)
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
@@ -168,6 +173,7 @@ class HotkeyManager {
         }
         toggleEventTap = nil
         toggleRunLoopSource = nil
+        supportsPreDispatchReturnCapture = false
         isConsumingToggleKeySequence = false
         hasOrphanedToggleKeyUp = false
     }
@@ -189,6 +195,12 @@ class HotkeyManager {
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let modifiers = NSEvent.ModifierFlags(rawValue: UInt(event.flags.rawValue))
             .intersection([.command, .shift, .control, .option, .function])
+        if type == .keyDown, [36, 76].contains(keyCode), modifiers.isEmpty {
+            manager.onBeforeReturn?()
+        }
+        if type == .leftMouseDown {
+            manager.onBeforeSubmitClick?(event.location)
+        }
         let decision = toggleTapDecision(
             eventType: type,
             keyCode: keyCode,
@@ -433,6 +445,8 @@ class HotkeyManager {
 
         onInterceptedEnterKey = nil
         shouldInterceptEnterForEditTracking = nil
+        onBeforeReturn = nil
+        onBeforeSubmitClick = nil
         onTrackedKeyEvent = nil
         HotkeyManager.shared = nil
     }

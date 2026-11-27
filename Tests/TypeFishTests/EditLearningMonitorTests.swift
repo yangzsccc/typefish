@@ -157,4 +157,59 @@ final class EditLearningMonitorTests: XCTestCase {
         await wait { !monitor.isActive }
         XCTAssertEqual(result, ["Claude Code"])
     }
+
+    func testReturnImmediatelyAfterCommittedFieldEventKeepsSpellingWhenComposerClears() async {
+        let monitor = EditLearningMonitor(timing: timing)
+        let field = SampleField(.text("Cloud"))
+        var results: [EditLearningMonitor.Completion] = []
+        monitor.startDeciding(original: "Cloud", confirm: { field.read }, classify: { _ in .learn("Claude") },
+                              onCompletion: { results.append($0) })
+        try? await Task.sleep(nanoseconds: 10_000_000)
+
+        monitor.noteFieldChange(.text("Claude"))
+        monitor.noteEnter()
+        field.set(.cleared)
+        monitor.noteFieldChange(.cleared)
+
+        await wait { !monitor.isActive }
+        XCTAssertEqual(results.count, 1)
+        if case .decision(.learn("Claude")) = results.first {} else {
+            XCTFail("The committed spelling should survive immediate submission")
+        }
+    }
+
+    func testFocusSwitchFinalizesCommittedAnchoredEdit() async {
+        let monitor = EditLearningMonitor(timing: timing)
+        let field = SampleField(.text("Claude"))
+        var results: [EditLearningMonitor.Completion] = []
+        monitor.startDeciding(original: "Cloud", confirm: { field.read }, classify: { _ in .learn("Claude") },
+                              onCompletion: { results.append($0) })
+        try? await Task.sleep(nanoseconds: 10_000_000)
+        monitor.noteFieldChange(.text("Claude"))
+        monitor.noteFocusLoss()
+
+        await wait { !monitor.isActive }
+        XCTAssertEqual(results.count, 1)
+        if case .decision(.learn("Claude")) = results.first {} else {
+            XCTFail("A verified edit should be learned when focus leaves the field")
+        }
+    }
+
+    func testComposingTextNeverLearnsWhenReturnClearsTheField() async {
+        let monitor = EditLearningMonitor(timing: timing)
+        let field = SampleField(.text("Cloud"))
+        var results: [EditLearningMonitor.Completion] = []
+        monitor.startDeciding(original: "Cloud", confirm: { field.read }, classify: { _ in
+            XCTFail("Uncommitted input reached the classifier")
+            return .skip
+        }, onCompletion: { results.append($0) })
+        try? await Task.sleep(nanoseconds: 10_000_000)
+        monitor.noteFieldChange(.composing)
+        monitor.noteEnter()
+        monitor.noteFieldChange(.cleared)
+
+        await wait { !monitor.isActive }
+        XCTAssertEqual(results.count, 1)
+        if case .unchanged = results.first {} else { XCTFail("Composition must be discarded") }
+    }
 }

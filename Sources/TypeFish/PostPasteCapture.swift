@@ -329,6 +329,46 @@ final class PostPasteCaptureAnchor {
     private let region: AnchoredTextRegion
     private let pinyinWitness: PinyinCommitWitness
 
+    var processIdentifier: pid_t { target.target.processIdentifier }
+
+    func observeChanges(_ callback: @escaping () -> Void) -> AccessibilityObservationToken? {
+        AccessibilityObservationToken(target: target.target, callback: callback)
+    }
+
+    func isCurrentlyFocused() -> Bool {
+        NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier
+            && target.target.focusedElementIsDifferent() == false
+    }
+
+    func isSendButton(at point: CGPoint) -> Bool {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier,
+              AXIsProcessTrusted(), !IsSecureEventInputEnabled() else { return false }
+        let applicationElement = AXUIElementCreateApplication(processIdentifier)
+        let deadline = Date().addingTimeInterval(0.035)
+        var hitElement: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(applicationElement, Float(point.x), Float(point.y), &hitElement) == .success,
+              var element = hitElement else { return false }
+
+        for _ in 0..<6 {
+            guard let window = AccessibilityFieldSnapshot.copyElementAttribute(
+                kAXWindowAttribute as CFString, from: element, deadline: deadline
+            ), CFEqual(window, target.target.window) else { return false }
+            let role = AccessibilityFieldSnapshot.copyStringAttribute(
+                kAXRoleAttribute as CFString, from: element, deadline: deadline
+            ) ?? ""
+            let labelAttributes: [CFString] = [kAXTitleAttribute as CFString, kAXDescriptionAttribute as CFString,
+                                               kAXHelpAttribute as CFString, "AXIdentifier" as CFString]
+            let labels = labelAttributes
+                .compactMap { AccessibilityFieldSnapshot.copyAttribute($0, from: element, deadline: deadline) as? String }
+            if AccessibilityCapturePolicy.isSendButton(role: role, labels: labels) { return true }
+            guard let parent = AccessibilityFieldSnapshot.copyElementAttribute(
+                kAXParentAttribute as CFString, from: element, deadline: deadline
+            ) else { return false }
+            element = parent
+        }
+        return false
+    }
+
     fileprivate init(
         application: NSRunningApplication,
         target: AccessibilityFieldSnapshot,
@@ -385,6 +425,138 @@ final class PostPasteCaptureAnchor {
         }
         return observation
     }
+
+    func readForMonitoring(inputMethod: InputMethodSnapshot,
+                           onFocusLoss: (() -> Void)? = nil) -> AnchoredEditObservation {
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != processIdentifier {
+            onFocusLoss?()
+            return readBound(inputMethod: inputMethod)
+        }
+        let current = read(inputMethod: inputMethod)
+        guard current == .unavailable else { return current }
+        guard target.target.focusedElementIsDifferent() == true else { return current }
+        onFocusLoss?()
+        return readBound(inputMethod: inputMethod)
+    }
+
+    /// AX value notifications arrive only for the stored element. When it still
+    /// has focus, snapshot its committed value synchronously before Return clears it.
+    func readForFieldChange(inputMethod: InputMethodSnapshot) -> AnchoredEditObservation {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier else {
+            return .temporarilyUnavailable
+        }
+        guard let current = AccessibilityFieldSnapshot.read(from: application, totalTimeout: 0.05) else {
+            return .temporarilyUnavailable
+        }
+        guard target.target.matches(current.target) else {
+            return .temporarilyUnavailable
+        }
+        if current.markedTextStatus == .unavailable && inputMethod.isNonDirect { return .composing }
+        return region.observation(in: current.text, selectedRange: current.selectedRange,
+                                  markedTextStatus: current.markedTextStatus,
+                                  isNonDirectInputMethod: inputMethod.isNonDirect)
+    }
+
+    /// Keeps observing the originally verified element after its app loses focus.
+    func readBound(inputMethod: InputMethodSnapshot) -> AnchoredEditObservation {
+        guard !Thread.isMainThread, AXIsProcessTrusted(), !IsSecureEventInputEnabled(),
+              NSRunningApplication(processIdentifier: target.target.processIdentifier)?.isTerminated == false else {
+            return .unavailable
+        }
+        let deadline = Date().addingTimeInterval(0.08)
+        let element = target.target.element
+        guard let currentWindow = AccessibilityFieldSnapshot.copyElementAttribute(
+            kAXWindowAttribute as CFString, from: element, deadline: deadline
+        ), CFEqual(currentWindow, target.target.window),
+        let role = AccessibilityFieldSnapshot.copyStringAttribute(
+            kAXRoleAttribute as CFString, from: element, deadline: deadline
+        ),
+        role != "AXSecureTextField",
+        AccessibilityFieldSnapshot.copyStringAttribute(kAXSubroleAttribute as CFString, from: element, deadline: deadline) != "AXSecureTextField",
+        (AccessibilityFieldSnapshot.copyAttribute("AXProtectedContent" as CFString, from: element, deadline: deadline) as? Bool) != true,
+        let value = AccessibilityFieldSnapshot.copyAttribute(
+            kAXValueAttribute as CFString, from: element, deadline: deadline
+        ) as? String,
+        let selected = AccessibilityFieldSnapshot.copyAXValueAttribute(
+            kAXSelectedTextRangeAttribute as CFString, from: element, deadline: deadline
+        ) else { return .temporarilyUnavailable }
+
+        var range = CFRange()
+        guard AXValueGetValue(selected, .cfRange, &range), range.location >= 0, range.length >= 0 else {
+            return .temporarilyUnavailable
+        }
+        let selectedRange = NSRange(location: range.location, length: range.length)
+        guard AnchoredTextRegion.isValidUTF16Range(selectedRange, in: value) else { return .temporarilyUnavailable }
+
+        let markedValue = AccessibilityFieldSnapshot.copyAXValueAttribute(
+            "AXTextInputMarkedRange" as CFString, from: element, deadline: deadline
+        ) ?? AccessibilityFieldSnapshot.copyAXValueAttribute("AXMarkedTextRange" as CFString, from: element, deadline: deadline)
+        var markedRange = CFRange()
+        let markedStatus: MarkedTextStatus
+        if let markedValue, AXValueGetValue(markedValue, .cfRange, &markedRange), markedRange.length >= 0 {
+            markedStatus = markedRange.length > 0 ? .present : .absent
+        } else {
+            markedStatus = .unavailable
+        }
+        let shouldScanCandidates = target.isProseMirrorEditor
+            && inputMethod.sourceID == PinyinCommitWitness.inputSourceID
+            && markedStatus == .unavailable
+            && pinyinWitness.needsCandidateScan(text: value, selection: selectedRange)
+            && region.candidate(in: value, selectedRange: selectedRange).map {
+                !$0.utf16.elementsEqual(region.originalText.utf16)
+            } == true
+        let candidateScan = shouldScanCandidates
+            ? PinyinCandidateScanner.scan(processIdentifier: processIdentifier)
+            : .unavailable
+        if let witnessed = pinyinWitness.observe(
+            text: value,
+            selection: selectedRange,
+            markedTextStatus: markedStatus,
+            inputSourceID: inputMethod.sourceID,
+            targetIsProseMirror: target.isProseMirrorEditor,
+            candidateScan: candidateScan,
+            anchoredText: { [region] text, selection in region.candidate(in: text, selectedRange: selection) }
+        ) {
+            return witnessed
+        }
+        return region.observation(in: value, selectedRange: selectedRange,
+                                 markedTextStatus: markedStatus,
+                                 isNonDirectInputMethod: inputMethod.isNonDirect)
+    }
+}
+
+final class AccessibilityObservationToken {
+    private let observer: AXObserver
+    private let target: AccessibilityTargetIdentity
+    private let callback: () -> Void
+
+    fileprivate init?(target: AccessibilityTargetIdentity, callback: @escaping () -> Void) {
+        self.target = target
+        self.callback = callback
+        var createdObserver: AXObserver?
+        let creation = AXObserverCreate(target.processIdentifier, { _, _, _, context in
+            guard let context else { return }
+            Unmanaged<AccessibilityObservationToken>.fromOpaque(context)
+                .takeUnretainedValue().callback()
+        }, &createdObserver)
+        guard creation == .success, let createdObserver else { return nil }
+        self.observer = createdObserver
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        let valueStatus = AXObserverAddNotification(
+            createdObserver, target.element, kAXValueChangedNotification as CFString, context
+        )
+        let selectionStatus = AXObserverAddNotification(
+            createdObserver, target.element, kAXSelectedTextChangedNotification as CFString, context
+        )
+        guard valueStatus == .success || selectionStatus == .success else { return nil }
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(createdObserver), .commonModes)
+    }
+
+    deinit {
+        AXObserverRemoveNotification(observer, target.element, kAXValueChangedNotification as CFString)
+        AXObserverRemoveNotification(observer, target.element, kAXSelectedTextChangedNotification as CFString)
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+    }
 }
 
 enum TypeFishInputMethodState {
@@ -410,6 +582,16 @@ enum TypeFishInputMethodState {
 }
 
 enum AccessibilityCapturePolicy {
+    static func isSendButton(role: String, labels: [String]) -> Bool {
+        guard role == "AXButton" else { return false }
+        return labels.contains { label in
+            let value = label.lowercased().filter { $0.isLetter || $0.isNumber }
+            return ["send", "sendmessage", "sendprompt", "sendchat", "submit", "submitmessage",
+                    "composersubmitbutton", "发送", "发送消息", "发消息", "提交", "提交消息"]
+                .contains(value)
+        }
+    }
+
     static func includesInsertedCharacter(endingAt caret: Int, visibleRange: CFRange) -> Bool {
         guard visibleRange.location >= 0, visibleRange.length >= 0,
               caret > visibleRange.location else { return false }
@@ -573,7 +755,7 @@ private extension AccessibilityFieldSnapshot {
         )
     }
 
-    private static func copyAttribute(
+    fileprivate static func copyAttribute(
         _ attribute: CFString,
         from element: AXUIElement,
         deadline: Date
@@ -600,7 +782,7 @@ private extension AccessibilityFieldSnapshot {
         return unsafeBitCast(reference, to: AXValue.self)
     }
 
-    private static func copyStringAttribute(_ attribute: CFString, from element: AXUIElement, deadline: Date) -> String? {
+    fileprivate static func copyStringAttribute(_ attribute: CFString, from element: AXUIElement, deadline: Date) -> String? {
         copyAttribute(attribute, from: element, deadline: deadline) as? String
     }
 
@@ -678,5 +860,17 @@ struct AccessibilityTargetIdentity {
         processIdentifier == other.processIdentifier
             && CFEqual(window, other.window)
             && CFEqual(element, other.element)
+    }
+
+    fileprivate func focusedElementIsDifferent() -> Bool? {
+        guard AXIsProcessTrusted() else { return nil }
+        let app = AXUIElementCreateApplication(processIdentifier)
+        let deadline = Date().addingTimeInterval(0.05)
+        guard let currentWindow = AccessibilityFieldSnapshot.copyElementAttribute(
+            kAXFocusedWindowAttribute as CFString, from: app, deadline: deadline
+        ), let currentField = AccessibilityFieldSnapshot.copyElementAttribute(
+            kAXFocusedUIElementAttribute as CFString, from: app, deadline: deadline
+        ) else { return nil }
+        return !CFEqual(currentWindow, window) || !CFEqual(currentField, element)
     }
 }

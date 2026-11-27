@@ -498,11 +498,9 @@ class AppState: ObservableObject {
                 model: self.config.polisherModel,
                 systemPrompt: fullSystemPrompt
             ) { polishedText in
+                let finalText = recordingDictionary.applyReplacements(polishedText)
                 DispatchQueue.main.async {
                     guard self.recordingID == id, self.isProcessing else { return }
-                    // Apply reverse replacements AFTER polishing
-                    // Catches cases where polisher translates English to Chinese
-                    let finalText = recordingDictionary.applyReplacements(polishedText)
                     metrics.polishTimeMs = Int((CFAbsoluteTimeGetCurrent() - polishStartTime) * 1000)
                     metrics.totalTimeMs = Int((CFAbsoluteTimeGetCurrent() - pipelineStartTime) * 1000)
 
@@ -544,7 +542,8 @@ class AppState: ObservableObject {
                                 pastedText: finalText,
                                 confirmedAnchor: confirmation.learningAnchor,
                                 apiKey: key,
-                                appState: self
+                                appState: self,
+                                historyID: id
                             )
                         }
 
@@ -588,10 +587,11 @@ class AppState: ObservableObject {
 
                 // Log transcription for evolution pipeline
                 TranscriptionLogger.log(
+                    id: id,
                     audioURL: audioURL,
                     uploadURL: uploadURL,
                     whisperRaw: whisperRawText,
-                    polished: polishedText,
+                    polished: finalText,
                     mode: isTranslating ? "translate" : "transcribe",
                     whisperModel: self.config.whisperModel,
                     polisherModel: self.config.polisherModel,
@@ -609,6 +609,35 @@ class AppState: ObservableObject {
             WhisperAPI.translate(fileURL: uploadURL, apiKey: apiKey, model: config.whisperModel, prompt: vocabPrompt, completion: whisperCallback)
         } else {
             WhisperAPI.transcribe(fileURL: uploadURL, apiKey: apiKey, model: config.whisperModel, language: config.whisperLanguage, prompt: vocabPrompt, completion: whisperCallback)
+        }
+    }
+
+    /// Replay the saved audio against today's dictionary. Return the result to History.
+    func retryAudio(_ entry: TranscriptionLogger.HistoryEntry, completion: @escaping (String?) -> Void) {
+        guard let audio = TranscriptionLogger.savedAudio(for: entry), let key = groqAPIKey else {
+            completion(nil)
+            return
+        }
+        let snapshot = dictionary
+        let model = config.polisherModel
+        var prompt = config.polisherSystemPrompt
+        if let reference = snapshot.polisherReference() { prompt += "\n\n" + reference }
+        let receive: (String) -> Void = { raw in
+            guard !raw.isEmpty, !TextPolisher.isHallucination(raw) else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            TextPolisher.polish(text: snapshot.applyReplacements(raw), apiKey: key, model: model, systemPrompt: prompt) { polished in
+                let text = snapshot.applyReplacements(polished)
+                DispatchQueue.main.async { completion(text.isEmpty ? nil : text) }
+            }
+        }
+        if entry.mode == "translate" {
+            WhisperAPI.translate(fileURL: audio, apiKey: key, model: config.whisperModel,
+                                 prompt: snapshot.whisperPrompt(), completion: receive)
+        } else {
+            WhisperAPI.transcribe(fileURL: audio, apiKey: key, model: config.whisperModel, language: config.whisperLanguage,
+                                  prompt: snapshot.whisperPrompt(), completion: receive)
         }
     }
 

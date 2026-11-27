@@ -131,6 +131,9 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private var dictionaryTable: NSTableView?
     private var dictionaryRows: [DictionaryRow] = []
     private var historyTable: NSTableView?
+    private var historyLearnButton: NSButton?
+    private var historyRetryButton: NSButton?
+    private var historyRetryInProgress = false
     private var historyRows: [TranscriptionLogger.HistoryEntry] = []
     private var loggedAutoCorrectionKeys: Set<String> = []
 
@@ -144,6 +147,14 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     init(state: AppState) {
         self.state = state
         super.init()
+        NotificationCenter.default.addObserver(self, selector: #selector(historyChanged),
+                                               name: TranscriptionLogger.didChange, object: nil)
+    }
+
+    @objc private func historyChanged() {
+        guard window?.isVisible == true else { return }
+        refreshHistory()
+        lastResultLabel?.stringValue = lastResultSummaryText()
     }
 
     func showWindow() {
@@ -236,7 +247,6 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
         if window?.isVisible == true {
             refreshLoggedAutoCorrectionKeys()
-            refreshHistory()
             refreshDictionaryTable()
             refreshPopups()
         }
@@ -538,7 +548,16 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         styleActionButton(refresh, symbol: "arrow.clockwise")
         actionsPanel.addSubview(refresh)
 
-        let tableSurface = surface(frame: NSRect(x: 0, y: 22, width: frame.width, height: frame.height - 140))
+        let learn = NSButton(title: "记住拼写", target: self, action: #selector(changeHistoryLearning))
+        let retry = NSButton(title: "用原录音重试", target: self, action: #selector(retryHistoryAudio))
+        let actions = NSStackView(views: [retry, learn])
+        actions.orientation = .horizontal
+        actions.spacing = 8
+        actions.frame = NSRect(origin: NSPoint(x: 4, y: 10), size: actions.fittingSize)
+        view.addSubview(actions)
+        self.historyLearnButton = learn
+        self.historyRetryButton = retry
+        let tableSurface = surface(frame: NSRect(x: 0, y: 48, width: frame.width, height: frame.height - 166))
         tableSurface.autoresizingMask = [.width, .height]
         view.addSubview(tableSurface)
 
@@ -560,18 +579,24 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
         let timeColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("historyTime"))
         timeColumn.title = "Time"
-        timeColumn.width = 148
+        timeColumn.width = 133
         table.addTableColumn(timeColumn)
 
         let modeColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("historyMode"))
         modeColumn.title = "Mode"
-        modeColumn.width = 92
+        modeColumn.width = 68
         table.addTableColumn(modeColumn)
 
         let textColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("historyText"))
         textColumn.title = "Result"
-        textColumn.width = max(frame.width - 430, 260)
+        textColumn.width = max(frame.width - 540, 150)
         table.addTableColumn(textColumn)
+
+        let learningColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("historyLearning"))
+        learningColumn.title = "拼写学习"
+        learningColumn.width = 175
+        table.addTableColumn(learningColumn)
+        scroll.hasHorizontalScroller = true
 
         let modelColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("historyModel"))
         modelColumn.title = "Model"
@@ -953,12 +978,16 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             case "historyText":
                 textField.stringValue = item.preview
                 textField.textColor = .labelColor
+            case "historyLearning":
+                textField.stringValue = item.learning?.label ?? "—"
+                textField.textColor = .labelColor
             case "historyModel":
                 textField.stringValue = item.polisherModel.isEmpty ? item.whisperModel : item.polisherModel
                 textField.textColor = .tertiaryLabelColor
             default:
                 textField.stringValue = ""
             }
+            cell.toolTip = textField.stringValue
             return cell
         }
 
@@ -982,7 +1011,8 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        updateDictionaryButtons()
+        if notification.object as? NSTableView === historyTable { updateHistoryButtons() }
+        else { updateDictionaryButtons() }
     }
 
     private func selectedDictionaryKind() -> DictionaryViewKind {
@@ -1232,8 +1262,87 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     private func refreshHistory() {
-        historyRows = TranscriptionLogger.recentHistory(limit: 80)
-        historyTable?.reloadData()
+        let selected = selectedHistory
+        let rows = TranscriptionLogger.recentHistory(limit: 80)
+        if rows != historyRows {
+            historyRows = rows
+            historyTable?.reloadData()
+            if let selected, let index = rows.firstIndex(where: { row in
+                selected.id != nil ? row.id == selected.id : row == selected
+            }) {
+                historyTable?.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            }
+        } else if historyTable?.numberOfRows != rows.count {
+            historyTable?.reloadData()
+        }
+        updateHistoryButtons()
+    }
+
+    private var selectedHistory: TranscriptionLogger.HistoryEntry? {
+        guard let index = historyTable?.selectedRow, historyRows.indices.contains(index) else { return nil }
+        return historyRows[index]
+    }
+
+    private func updateHistoryButtons() {
+        let row = selectedHistory
+        let action: String?
+        switch row?.learning {
+        case .candidate(let term): action = "记住 " + term
+        case .learned(let record) where state?.dictionary.learnedSpellingPreferences.contains(record) == true:
+            action = "撤销学习"
+        default: action = nil
+        }
+        historyLearnButton?.title = action ?? "记住拼写"
+        historyLearnButton?.isEnabled = action != nil
+        let hasAudio = row.flatMap(TranscriptionLogger.savedAudio) != nil
+        historyRetryButton?.isEnabled = !historyRetryInProgress && hasAudio
+        historyRetryButton?.toolTip = row == nil ? "先选择一条听写记录" :
+            (hasAudio ? "使用当前词典重新转录，在历史窗口预览结果" : "此记录没有可重试的录音")
+        historyRetryButton?.title = historyRetryInProgress ? "正在重试…" : "用原录音重试"
+        if let stack = historyLearnButton?.superview as? NSStackView {
+            stack.setFrameSize(stack.fittingSize)
+        }
+    }
+
+    @objc private func changeHistoryLearning() {
+        guard let row = selectedHistory, let id = row.id, let state else { return }
+        let outcome: HistoryLearning
+        switch row.learning {
+        case .candidate(let term):
+            if let saved = state.dictionary.addLearnedSpellingPreference(term) { outcome = .learned(saved) }
+            else if state.dictionary.learnedSpellingPreferences.contains(where: { $0.phrase.localizedCaseInsensitiveCompare(term) == .orderedSame }) {
+                outcome = .alreadyKnown(term)
+            } else { NSSound.beep(); return }
+        case .learned(let saved):
+            guard state.dictionary.undoLearnedSpellingPreference(saved) else { NSSound.beep(); return }
+            outcome = .undone(saved.phrase)
+        default: return
+        }
+        TranscriptionLogger.recordLearning(outcome, for: id)
+        refreshHistory()
+        state.onStateChange?()
+    }
+
+    @objc private func retryHistoryAudio() {
+        guard let row = selectedHistory, !historyRetryInProgress, let state, let window else { return }
+        historyRetryInProgress = true
+        updateHistoryButtons()
+        state.retryAudio(row) { [weak self] result in
+            guard let self else { return }
+            self.historyRetryInProgress = false
+            self.updateHistoryButtons()
+            let alert = NSAlert()
+            alert.messageText = "原录音重试结果"
+            alert.informativeText = result ?? "未能转录这段录音，请检查录音文件和网络后重试。"
+            alert.addButton(withTitle: "关闭")
+            if result != nil { alert.addButton(withTitle: "复制结果") }
+            alert.beginSheetModal(for: window) { response in
+                if response == .alertSecondButtonReturn, let result {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(result, forType: .string)
+                }
+            }
+        }
     }
 
     private func lastHistoryText() -> String? {
