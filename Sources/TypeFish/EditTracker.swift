@@ -54,8 +54,8 @@ class EditTracker {
         let model = appState.config.polisherModel
         monitor.start(original: pastedText, confirm: {
             {
-                let composingInput = DispatchQueue.main.sync { TypeFishInputMethodState.isNonDirectOnMainThread() }
-                return confirmedAnchor.read(isNonDirectInputMethod: composingInput)
+                let inputMethod = DispatchQueue.main.sync { TypeFishInputMethodState.snapshotOnMainThread() }
+                return confirmedAnchor.read(inputMethod: inputMethod)
             }
         }, classify: { [weak self] edited in
             await self?.preferredSpelling(original: pastedText, edited: edited, apiKey: apiKey, model: model)

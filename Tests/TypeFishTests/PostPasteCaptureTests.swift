@@ -320,6 +320,134 @@ final class PostPasteCaptureTests: XCTestCase {
         ))
     }
 
+    func testVerifiedStructuralEmptyProseMirrorParagraphCanBeReplacedByExactDictation() {
+        let insertedText = "请把名单发给刘俊年。"
+        let before = TextFieldSnapshot(
+            text: "\n",
+            selectedRange: NSRange(location: 0, length: 0),
+            markedTextStatus: .unavailable
+        )
+        let after = TextFieldSnapshot(
+            text: insertedText,
+            selectedRange: NSRange(location: 6, length: 0),
+            markedTextStatus: .unavailable
+        )
+
+        let region = AnchoredTextRegion.confirmed(
+            before: before, after: after, insertedText: insertedText, sameTarget: true,
+            allowSelectionWithinInsertedText: true, isStructuralEmptyParagraph: true
+        )
+        let retainedBreak = TextFieldSnapshot(
+            text: insertedText + "\n", selectedRange: after.selectedRange, markedTextStatus: .unavailable
+        )
+        XCTAssertEqual(AnchoredTextRegion.confirmed(
+            before: before, after: retainedBreak, insertedText: insertedText, sameTarget: true,
+            allowSelectionWithinInsertedText: true, isStructuralEmptyParagraph: true
+        )?.suffix, "\n")
+        XCTAssertEqual(region?.candidate(in: "请把名单发给刘俊言。"), "请把名单发给刘俊言。")
+    }
+
+    func testStructuralEmptyComposerFallbackRejectsDraftsWrongTargetsAndComposition() {
+        let insertedText = "Please send the file."
+        let before = TextFieldSnapshot(
+            text: "\n",
+            selectedRange: NSRange(location: 0, length: 0),
+            markedTextStatus: .unavailable
+        )
+        let after = TextFieldSnapshot(
+            text: insertedText,
+            selectedRange: NSRange(location: (insertedText as NSString).length, length: 0),
+            markedTextStatus: .unavailable
+        )
+        func proves(
+            before: TextFieldSnapshot = before,
+            after: TextFieldSnapshot = after,
+            sameTarget: Bool = true,
+            isVerifiedStructuralEmptyParagraph: Bool = true
+        ) -> Bool {
+            AnchoredTextRegion.confirmed(
+                before: before, after: after, insertedText: insertedText, sameTarget: sameTarget,
+                allowSelectionWithinInsertedText: true, isStructuralEmptyParagraph: isVerifiedStructuralEmptyParagraph
+            ) != nil
+        }
+
+        XCTAssertFalse(proves(sameTarget: false))
+        XCTAssertFalse(proves(isVerifiedStructuralEmptyParagraph: false))
+        XCTAssertFalse(proves(before: TextFieldSnapshot(
+            text: "draft",
+            selectedRange: NSRange(location: 0, length: 0),
+            markedTextStatus: .unavailable
+        )))
+        XCTAssertFalse(proves(before: TextFieldSnapshot(
+            text: " ",
+            selectedRange: NSRange(location: 0, length: 0),
+            markedTextStatus: .unavailable
+        )))
+        XCTAssertFalse(proves(before: TextFieldSnapshot(
+            text: "\n",
+            selectedRange: NSRange(location: 1, length: 0),
+            markedTextStatus: .unavailable
+        )))
+        XCTAssertFalse(proves(after: TextFieldSnapshot(
+            text: insertedText + " changed",
+            selectedRange: NSRange(location: insertedText.utf16.count, length: 0),
+            markedTextStatus: .unavailable
+        )))
+        let outOfRangeSelection = TextFieldSnapshot(
+            text: insertedText,
+            selectedRange: NSRange(location: insertedText.utf16.count + 1, length: 0),
+            markedTextStatus: .unavailable
+        )
+        XCTAssertFalse(proves(after: outOfRangeSelection))
+        XCTAssertFalse(proves(before: TextFieldSnapshot(
+            text: "\n",
+            selectedRange: NSRange(location: 0, length: 0),
+            markedTextStatus: .present
+        )))
+    }
+
+    func testStructuralEmptyParagraphRequiresTheExactAccessibilityTreeShape() {
+        func matches(
+            value: String = "\n",
+            selectedRange: NSRange = NSRange(location: 0, length: 0),
+            markedTextStatus: MarkedTextStatus = .unavailable,
+            editorRole: String = "AXTextArea",
+            editorClasses: [String] = ["ProseMirror", "ProseMirror-focused"],
+            childCount: Int = 1,
+            childRole: String? = "AXGroup",
+            childValue: String? = "",
+            childTitle: String? = "",
+            grandchildCount: Int? = 0
+        ) -> Bool {
+            AccessibilityCapturePolicy.isStructuralEmptyProseMirrorParagraph(
+                value: value,
+                selection: selectedRange,
+                markedTextStatus: markedTextStatus,
+                editorRole: editorRole,
+                editorClasses: editorClasses,
+                childCount: childCount,
+                childRole: childRole,
+                childValue: childValue,
+                childTitle: childTitle,
+                grandchildCount: grandchildCount
+            )
+        }
+
+        XCTAssertTrue(matches())
+        XCTAssertFalse(matches(value: " "))
+        XCTAssertFalse(matches(value: "\nuser text"))
+        XCTAssertFalse(matches(selectedRange: NSRange(location: 1, length: 0)))
+        XCTAssertFalse(matches(markedTextStatus: .present))
+        XCTAssertFalse(matches(editorRole: "AXTextField"))
+        XCTAssertFalse(matches(editorClasses: ["RichText"]))
+        XCTAssertFalse(matches(childCount: 2))
+        XCTAssertFalse(matches(childRole: "AXStaticText"))
+        XCTAssertFalse(matches(childValue: "user text"))
+        XCTAssertFalse(matches(childTitle: "document text"))
+        XCTAssertFalse(matches(grandchildCount: 1))
+        XCTAssertFalse(matches(grandchildCount: nil))
+    }
+
     func testInsertionAtStartOfRealDraftPreservesItsOriginalText() {
         let insertedText = "dictation"
         let existingDraft = "existing draft"

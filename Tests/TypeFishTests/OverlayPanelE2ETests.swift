@@ -78,7 +78,11 @@ final class OverlayPanelE2ETests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(0.3))
         XCTAssertTrue(try runOnMainThread { overlay.resultWindowIsVisibleForTesting() })
 
-        RunLoop.current.run(until: Date().addingTimeInterval(OverlayPanel.resultAutoDismissInterval - 1 + 0.4))
+        // AppKit can coalesce timers while XCTest pumps the run loop.
+        let deadline = Date().addingTimeInterval(OverlayPanel.resultAutoDismissInterval + 1)
+        while Date() < deadline, try runOnMainThread({ overlay.resultWindowIsVisibleForTesting() }) {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
         XCTAssertFalse(try runOnMainThread { overlay.resultWindowIsVisibleForTesting() })
     }
 

@@ -181,7 +181,9 @@ final class ContextSnapshotE2ETests: XCTestCase {
     }
 
     private static func read(_ anchor: PostPasteCaptureAnchor) async -> AnchoredEditObservation {
-        await Task.detached(priority: .utility) { anchor.read(isNonDirectInputMethod: false) }.value
+        await Task.detached(priority: .utility) {
+            anchor.read(inputMethod: InputMethodSnapshot(isNonDirect: false, sourceID: nil))
+        }.value
     }
 
     private static func focusedEditableElement(in app: NSRunningApplication) -> AXUIElement? {

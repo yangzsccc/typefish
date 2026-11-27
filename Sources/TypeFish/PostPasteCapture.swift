@@ -51,7 +51,8 @@ struct AnchoredTextRegion: Equatable {
         after: TextFieldSnapshot,
         insertedText: String,
         sameTarget: Bool,
-        allowSelectionWithinInsertedText: Bool = false
+        allowSelectionWithinInsertedText: Bool = false,
+        isStructuralEmptyParagraph: Bool = false
     ) -> AnchoredTextRegion? {
         guard sameTarget,
               before.markedTextStatus != .present,
@@ -66,10 +67,14 @@ struct AnchoredTextRegion: Equatable {
             in: before.selectedRange,
             with: insertedText
         )
+        // Chromium can consume the trailing BR of an empty ProseMirror paragraph.
+        // When the newline survives, the ordinary match retains it as the suffix.
+        let replacedStructuralBreak = isStructuralEmptyParagraph
+            && before.text == "\n"
+            && before.selectedRange == NSRange(location: 0, length: 0)
+            && exactlyMatches(after.text, insertedText)
         guard !exactlyMatches(before.text, after.text),
-              exactlyMatches(after.text, expectedText) else {
-            return nil
-        }
+              exactlyMatches(after.text, expectedText) || replacedStructuralBreak else { return nil }
 
         let insertedRange = NSRange(
             location: before.selectedRange.location,
@@ -168,6 +173,8 @@ private struct AccessibilityFieldSnapshot {
     let text: String
     let selectedRange: NSRange
     let markedTextStatus: MarkedTextStatus
+    let isProseMirrorEditor: Bool
+    let isProseMirrorStructuralEmpty: Bool
 
     var textSnapshot: TextFieldSnapshot {
         TextFieldSnapshot(text: text, selectedRange: selectedRange, markedTextStatus: markedTextStatus)
@@ -248,7 +255,8 @@ final class PendingPasteCapture {
         DispatchQueue.global(qos: .userInitiated).async {
             let captured = AccessibilityFieldSnapshot.read(
                 from: application,
-                totalTimeout: 0.025
+                totalTimeout: 0.025,
+                identifyEditor: true
             )
             resultBox.store(captured)
             semaphore.signal()
@@ -290,7 +298,8 @@ final class PendingPasteCapture {
             after: after.textSnapshot,
             insertedText: insertedText,
             sameTarget: true,
-            allowSelectionWithinInsertedText: true
+            allowSelectionWithinInsertedText: true,
+            isStructuralEmptyParagraph: before.isProseMirrorStructuralEmpty
         ) else {
             lastConfirmationFailure = "text-or-selection-mismatch beforeUTF16=\(before.text.utf16.count) insertedUTF16=\((insertedText as NSString).length) afterUTF16=\(after.text.utf16.count) selection=\(after.selectedRange.location),\(after.selectedRange.length)"
             return nil
@@ -299,8 +308,7 @@ final class PendingPasteCapture {
         let insertionEnd = region.prefix.utf16.count + region.originalText.utf16.count
         let deliveryConfirmed = !PasteService.requiresVerifiedTarget(for: application.bundleIdentifier)
             || after.target.hasVisibleInsertion(endingAt: insertionEnd)
-        lastConfirmationFailure = deliveryConfirmed
-            ? "confirmed"
+        lastConfirmationFailure = deliveryConfirmed ? "confirmed"
             : "visible-range-or-display-unavailable insertionEnd=\(insertionEnd) selection=\(after.selectedRange.location),\(after.selectedRange.length)"
 
         return PasteCaptureConfirmation(
@@ -319,6 +327,7 @@ final class PostPasteCaptureAnchor {
     private let application: NSRunningApplication
     private let target: AccessibilityFieldSnapshot
     private let region: AnchoredTextRegion
+    private let pinyinWitness: PinyinCommitWitness
 
     fileprivate init(
         application: NSRunningApplication,
@@ -328,24 +337,48 @@ final class PostPasteCaptureAnchor {
         self.application = application
         self.target = target
         self.region = region
+        self.pinyinWitness = PinyinCommitWitness()
     }
 
     func read(
-        isNonDirectInputMethod: Bool
+        inputMethod: InputMethodSnapshot
     ) -> AnchoredEditObservation {
         guard !Thread.isMainThread else { return .unavailable }
         guard let current = AccessibilityFieldSnapshot.read(from: application, totalTimeout: 0.05) else {
+            pinyinWitness.reset()
             return target.target.observationAfterReadFailure()
         }
         guard target.target.matches(current.target) else {
+            pinyinWitness.reset()
             Log.info("Edit learning: focused field or window changed")
             return .unavailable
+        }
+        let shouldScanCandidates = target.isProseMirrorEditor
+            && inputMethod.sourceID == PinyinCommitWitness.inputSourceID
+            && current.markedTextStatus == .unavailable
+            && pinyinWitness.needsCandidateScan(text: current.text, selection: current.selectedRange)
+            && region.candidate(in: current.text, selectedRange: current.selectedRange).map {
+                !$0.utf16.elementsEqual(region.originalText.utf16)
+            } == true
+        let candidateScan = shouldScanCandidates
+            ? PinyinCandidateScanner.scan(processIdentifier: application.processIdentifier)
+            : .unavailable
+        if let witnessed = pinyinWitness.observe(
+            text: current.text,
+            selection: current.selectedRange,
+            markedTextStatus: current.markedTextStatus,
+            inputSourceID: inputMethod.sourceID,
+            targetIsProseMirror: target.isProseMirrorEditor,
+            candidateScan: candidateScan,
+            anchoredText: { [region] text, selection in region.candidate(in: text, selectedRange: selection) }
+        ) {
+            return witnessed
         }
         let observation = region.observation(
             in: current.text,
             selectedRange: current.selectedRange,
             markedTextStatus: current.markedTextStatus,
-            isNonDirectInputMethod: isNonDirectInputMethod
+            isNonDirectInputMethod: inputMethod.isNonDirect
         )
         if observation == .unavailable {
             Log.info("Edit learning: insertion boundaries or caret no longer match")
@@ -355,15 +388,25 @@ final class PostPasteCaptureAnchor {
 }
 
 enum TypeFishInputMethodState {
-    static func isNonDirectOnMainThread() -> Bool {
-        guard Thread.isMainThread else { return true }
-        guard let inputSource = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
-              let sourceTypePointer = TISGetInputSourceProperty(inputSource, kTISPropertyInputSourceType) else {
-            return true
+    static func snapshotOnMainThread() -> InputMethodSnapshot {
+        guard Thread.isMainThread,
+              let inputSource = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else {
+            return InputMethodSnapshot(isNonDirect: true, sourceID: nil)
         }
-        let sourceType = Unmanaged<CFString>.fromOpaque(sourceTypePointer).takeUnretainedValue() as String
-        return sourceType != (kTISTypeKeyboardLayout as String)
+        let sourceTypePointer = TISGetInputSourceProperty(inputSource, kTISPropertyInputSourceType)
+        let sourceType = sourceTypePointer.map {
+            Unmanaged<CFString>.fromOpaque($0).takeUnretainedValue() as String
+        }
+        let sourceIDPointer = TISGetInputSourceProperty(inputSource, kTISPropertyInputSourceID)
+        let sourceID = sourceIDPointer.map {
+            Unmanaged<CFString>.fromOpaque($0).takeUnretainedValue() as String
+        }
+        return InputMethodSnapshot(
+            isNonDirect: sourceType != (kTISTypeKeyboardLayout as String),
+            sourceID: sourceID
+        )
     }
+
 }
 
 enum AccessibilityCapturePolicy {
@@ -378,6 +421,30 @@ enum AccessibilityCapturePolicy {
         guard selection == NSRange(location: 0, length: 0), !title.isEmpty,
               editorClasses.contains("ProseMirror"), childClasses.contains("placeholder") else { return false }
         return value.trimmingCharacters(in: .whitespacesAndNewlines) == title
+    }
+
+    static func isStructuralEmptyProseMirrorParagraph(
+        value: String,
+        selection: NSRange,
+        markedTextStatus: MarkedTextStatus,
+        editorRole: String,
+        editorClasses: [String],
+        childCount: Int,
+        childRole: String?,
+        childValue: String?,
+        childTitle: String?,
+        grandchildCount: Int?
+    ) -> Bool {
+        editorRole == "AXTextArea"
+            && editorClasses.contains("ProseMirror")
+            && value.utf16.elementsEqual("\n".utf16)
+            && selection == NSRange(location: 0, length: 0)
+            && markedTextStatus != .present
+            && childCount == 1
+            && childRole == "AXGroup"
+            && childValue == ""
+            && childTitle == ""
+            && grandchildCount == 0
     }
 
     static func isSecureInput(
@@ -396,7 +463,8 @@ enum AccessibilityCapturePolicy {
 private extension AccessibilityFieldSnapshot {
     static func read(
         from application: NSRunningApplication,
-        totalTimeout: TimeInterval = 0.05
+        totalTimeout: TimeInterval = 0.05,
+        identifyEditor: Bool = false
     ) -> AccessibilityFieldSnapshot? {
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier else {
             return nil
@@ -449,12 +517,40 @@ private extension AccessibilityFieldSnapshot {
 
         let selection = NSRange(location: selectedRange.location, length: selectedRange.length)
         var editableText = text
+        let needsEditorClasses = identifyEditor
+            || (selection == NSRange(location: 0, length: 0) && !text.isEmpty)
+        let editorClasses = needsEditorClasses
+            ? (copyAttribute("AXDOMClassList" as CFString, from: focusedElement, deadline: deadline) as? [String] ?? [])
+            : []
+        let isProseMirrorEditor = role == "AXTextArea" && editorClasses.contains("ProseMirror")
+        var isProseMirrorStructuralEmpty = false
+        if isProseMirrorEditor,
+           text.utf16.elementsEqual("\n".utf16), selection == NSRange(location: 0, length: 0),
+           let children = copyAttribute(kAXChildrenAttribute as CFString, from: focusedElement, deadline: deadline) as? [AXUIElement],
+           children.count == 1 {
+            let child = children[0]
+            let childRole = copyStringAttribute(kAXRoleAttribute as CFString, from: child, deadline: deadline)
+            let childValue = copyStringAttribute(kAXValueAttribute as CFString, from: child, deadline: deadline)
+            let childTitle = copyStringAttribute(kAXTitleAttribute as CFString, from: child, deadline: deadline)
+            let grandchildren = copyAttribute(kAXChildrenAttribute as CFString, from: child, deadline: deadline) as? [AXUIElement]
+            isProseMirrorStructuralEmpty = AccessibilityCapturePolicy.isStructuralEmptyProseMirrorParagraph(
+                value: text,
+                selection: selection,
+                markedTextStatus: markedTextStatus,
+                editorRole: role,
+                editorClasses: editorClasses,
+                childCount: children.count,
+                childRole: childRole,
+                childValue: childValue,
+                childTitle: childTitle,
+                grandchildCount: grandchildren?.count
+            )
+        }
         // A blank Codex composer exposes its prompt as AXValue and as a single
         // placeholder child. The first typed character removes that child.
         if !text.isEmpty, selection == NSRange(location: 0, length: 0),
            let title = copyStringAttribute(kAXTitleAttribute as CFString, from: focusedElement, deadline: deadline),
-           let editorClasses = copyAttribute("AXDOMClassList" as CFString, from: focusedElement, deadline: deadline) as? [String],
-           editorClasses.contains("ProseMirror"),
+           isProseMirrorEditor,
            let children = copyAttribute(kAXChildrenAttribute as CFString, from: focusedElement, deadline: deadline) as? [AXUIElement],
            children.count == 1,
            let classes = copyAttribute("AXDOMClassList" as CFString, from: children[0], deadline: deadline) as? [String],
@@ -471,7 +567,9 @@ private extension AccessibilityFieldSnapshot {
             ),
             text: editableText,
             selectedRange: selection,
-            markedTextStatus: markedTextStatus
+            markedTextStatus: markedTextStatus,
+            isProseMirrorEditor: isProseMirrorEditor,
+            isProseMirrorStructuralEmpty: isProseMirrorStructuralEmpty
         )
     }
 
