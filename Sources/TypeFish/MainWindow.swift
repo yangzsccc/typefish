@@ -94,6 +94,7 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         case vocabulary = 1
         case manual = 2
         case autoLearned = 3
+        case learnedSpelling = 4
     }
 
     private struct DictionaryRow {
@@ -101,6 +102,7 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         var right: String
         var source: ReplacementSource
         var kind: DictionaryViewKind
+        var preferenceID: UUID? = nil
     }
 
     private var window: NSWindow?
@@ -707,13 +709,13 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         view.autoresizingMask = [.width, .height]
 
         let segment = NSSegmentedControl(
-            labels: ["Hints", "Vocabulary", "Manual", "Auto"],
+            labels: ["Hints", "Vocabulary", "Manual", "Auto", "Learned"],
             trackingMode: .selectOne,
             target: self,
             action: #selector(dictionarySegmentChanged)
         )
         segment.selectedSegment = DictionaryViewKind.hints.rawValue
-        segment.frame = NSRect(x: 0, y: frame.height - 44, width: 390, height: 30)
+        segment.frame = NSRect(x: 0, y: frame.height - 44, width: 480, height: 30)
         segment.segmentStyle = .separated
         segment.autoresizingMask = [.minYMargin]
         view.addSubview(segment)
@@ -752,7 +754,7 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         }
 
         let wrongColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("wrong"))
-        wrongColumn.title = "Term"
+        wrongColumn.title = "Spelling"
         wrongColumn.minWidth = DictionaryColumnLayout.minimumWrongWidth
         table.addTableColumn(wrongColumn)
 
@@ -876,7 +878,7 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         summaryPanel.autoresizingMask = [.width, .minYMargin]
         view.addSubview(summaryPanel)
 
-        addSectionTitle("Auto-Learned Corrections", to: summaryPanel, x: 20, y: 106)
+        addSectionTitle("Learned Spelling Preferences", to: summaryPanel, x: 20, y: 106)
         let summary = valueLabel(learningSummaryText(), size: 13, weight: .regular)
         summary.textColor = .secondaryLabelColor
         summary.frame = NSRect(x: 20, y: 76, width: frame.width - 40, height: 22)
@@ -884,7 +886,7 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         summaryPanel.addSubview(summary)
         self.learningSummaryLabel = summary
 
-        let jump = NSButton(title: "Open Auto Corrections", target: self, action: #selector(showAutoLearnedCorrections))
+        let jump = NSButton(title: "Open Learned Spellings", target: self, action: #selector(showLearnedSpellingPreferences))
         jump.frame = NSRect(x: 20, y: 28, width: 188, height: 32)
         jump.autoresizingMask = [.minYMargin]
         styleActionButton(jump, symbol: "sparkles", prominent: true)
@@ -1017,6 +1019,17 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
                 }
                 .filter { $0.source == .autoLearned }
                 .sorted { $0.wrong.localizedCaseInsensitiveCompare($1.wrong) == .orderedAscending }
+        case .learnedSpelling:
+            rows = state.dictionary.learnedSpellingPreferences.map {
+                DictionaryRow(
+                    wrong: $0.phrase,
+                    right: "",
+                    source: .autoLearned,
+                    kind: .learnedSpelling,
+                    preferenceID: $0.id
+                )
+            }
+            .sorted { $0.wrong.localizedCaseInsensitiveCompare($1.wrong) == .orderedAscending }
         }
 
         if !query.isEmpty {
@@ -1041,7 +1054,8 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             return
         }
 
-        let showsReplacementColumns = !(kind == .hints || kind == .vocabulary)
+        let showsReplacementColumns = !(kind == .hints || kind == .vocabulary || kind == .learnedSpelling)
+        wrongColumn.title = kind == .learnedSpelling ? "Spelling" : "Term"
         let availableWidth = table.enclosingScrollView?.contentView.bounds.width ?? table.bounds.width
         let widths = DictionaryColumnLayout.widths(
             availableWidth: availableWidth,
@@ -1059,7 +1073,9 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
     private func updateDictionaryButtons() {
         let hasSelection = (dictionaryTable?.selectedRow ?? -1) >= 0
-        editButton?.isEnabled = hasSelection
+        let canEdit = selectedDictionaryKind() != .learnedSpelling
+        addButton?.isEnabled = canEdit
+        editButton?.isEnabled = hasSelection && canEdit
         deleteButton?.isEnabled = hasSelection
     }
 
@@ -1104,6 +1120,8 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             if let pair = promptForReplacement(title: "Add Correction", wrong: "", right: "") {
                 state?.addDictionaryReplacement(wrong: pair.wrong, right: pair.right, source: selectedDictionaryKind() == .autoLearned ? .autoLearned : .manual)
             }
+        case .learnedSpelling:
+            break
         }
         refreshDictionaryTable()
     }
@@ -1127,6 +1145,8 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             if let pair = promptForReplacement(title: "Edit Correction", wrong: row.wrong, right: row.right) {
                 state?.updateDictionaryReplacement(oldWrong: row.wrong, wrong: pair.wrong, right: pair.right, source: row.source)
             }
+        case .learnedSpelling:
+            break
         }
         refreshDictionaryTable()
     }
@@ -1144,6 +1164,14 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             state?.removeDictionaryVocabulary(row.wrong)
         case .manual, .autoLearned:
             state?.removeDictionaryReplacement(row.wrong)
+        case .learnedSpelling:
+            guard let state = state,
+                  let preferenceID = row.preferenceID,
+                  let preference = state.dictionary.learnedSpellingPreferences.first(where: { $0.id == preferenceID }) else {
+                return
+            }
+            _ = state.dictionary.undoLearnedSpellingPreference(preference)
+            state.onStateChange?()
         }
         refreshDictionaryTable()
     }
@@ -1158,10 +1186,10 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         NSWorkspace.shared.open(CustomDictionary.fileURL)
     }
 
-    @objc private func showAutoLearnedCorrections() {
+    @objc private func showLearnedSpellingPreferences() {
         selectedSectionIndex = MainWindowSection.dictionary.rawValue
         mainTabs?.selectTabViewItem(at: MainWindowSection.dictionary.rawValue)
-        dictionarySegment?.selectedSegment = DictionaryViewKind.autoLearned.rawValue
+        dictionarySegment?.selectedSegment = DictionaryViewKind.learnedSpelling.rawValue
         refreshDictionaryTable()
         updateNavigationSelection()
         updateContentHeader()
@@ -1456,7 +1484,7 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
     private func dictionarySummaryText() -> String {
         guard let dict = state?.dictionary else { return "No dictionary loaded" }
-        return "\(dict.hints.count) hints · \(dict.replacements.count) corrections · \(dict.vocabulary.count) vocabulary"
+        return "\(dict.hints.count) hints · \(dict.learnedSpellingPreferences.count) learned spellings · \(dict.replacements.count) corrections · \(dict.vocabulary.count) vocabulary"
     }
 
     private func learningSummaryText() -> String {
@@ -1464,7 +1492,7 @@ class MainWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         let autoCount = state.dictionary.replacements.filter { wrong, right in
             effectiveSource(wrong: wrong, right: right) == .autoLearned
         }.count
-        return "\(autoCount) auto-learned corrections"
+        return "\(state.dictionary.learnedSpellingPreferences.count) learned spellings · \(autoCount) auto-learned corrections"
     }
 
     private func healthStatsText() -> String {

@@ -2,6 +2,10 @@ import XCTest
 @testable import TypeFish
 
 final class ApplicationMenuTests: XCTestCase {
+    func testTypeFishLaunchesAsAccessoryMenuBarApp() {
+        XCTAssertEqual(AppDelegate.defaultActivationPolicy, .accessory)
+    }
+
     func testMainMenuProvidesNativeQuitAndCloseShortcuts() {
         let menu = ApplicationMenuFactory.makeMainMenu()
 

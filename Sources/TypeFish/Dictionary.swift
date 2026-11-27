@@ -12,6 +12,13 @@ struct ReplacementMetadata: Codable, Equatable {
     var updatedAt: String
 }
 
+struct LearnedSpellingPreference: Codable, Equatable, Identifiable {
+    var id: UUID
+    var phrase: String
+    var createdAt: String
+    var updatedAt: String? = nil
+}
+
 /// Custom dictionary with three-layer design:
 /// 1. hints: Words Whisper struggles with → sent as "spelling guide" prompt (max 896 chars)
 /// 2. replacements: Post-transcription corrections → 100% reliable find-replace
@@ -25,10 +32,13 @@ struct CustomDictionary: Codable {
     var vocabulary: [String] = []
     /// Provenance for replacement entries, keyed by the "wrong" text.
     var replacementMetadata: [String: ReplacementMetadata] = [:]
+    /// Spelling targets learned from user corrections, prioritized in prompts.
+    var learnedSpellingPreferences: [LearnedSpellingPreference] = []
+    private var storageURL: URL
 
     // Legacy support: if old format has "vocabulary" but no "hints", migrate
     private enum CodingKeys: String, CodingKey {
-        case hints, replacements, vocabulary, replacementMetadata
+        case hints, replacements, vocabulary, replacementMetadata, learnedSpellingPreferences
         // Ignore _comment fields
     }
 
@@ -36,12 +46,16 @@ struct CustomDictionary: Codable {
         hints: [String] = [],
         replacements: [String: String] = [:],
         vocabulary: [String] = [],
-        replacementMetadata: [String: ReplacementMetadata] = [:]
+        replacementMetadata: [String: ReplacementMetadata] = [:],
+        learnedSpellingPreferences: [LearnedSpellingPreference] = [],
+        storageURL: URL = fileURL
     ) {
         self.hints = hints
         self.replacements = replacements
         self.vocabulary = vocabulary
         self.replacementMetadata = replacementMetadata
+        self.learnedSpellingPreferences = learnedSpellingPreferences
+        self.storageURL = storageURL
     }
 
     init(from decoder: Decoder) throws {
@@ -50,6 +64,8 @@ struct CustomDictionary: Codable {
         self.replacements = try container.decodeIfPresent([String: String].self, forKey: .replacements) ?? [:]
         self.vocabulary = try container.decodeIfPresent([String].self, forKey: .vocabulary) ?? []
         self.replacementMetadata = try container.decodeIfPresent([String: ReplacementMetadata].self, forKey: .replacementMetadata) ?? [:]
+        self.learnedSpellingPreferences = try container.decodeIfPresent([LearnedSpellingPreference].self, forKey: .learnedSpellingPreferences) ?? []
+        self.storageURL = Self.fileURL
     }
 
     func encode(to encoder: Encoder) throws {
@@ -60,34 +76,49 @@ struct CustomDictionary: Codable {
         if !replacementMetadata.isEmpty {
             try container.encode(replacementMetadata, forKey: .replacementMetadata)
         }
+        if !learnedSpellingPreferences.isEmpty {
+            try container.encode(learnedSpellingPreferences, forKey: .learnedSpellingPreferences)
+        }
     }
 
     // MARK: - File Management
 
-    static let fileURL: URL = {
+    static var fileURL: URL {
+        if let override = ProcessInfo.processInfo.environment["TYPEFISH_DICTIONARY_PATH"], !override.isEmpty {
+            let url = URL(fileURLWithPath: override)
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            return url
+        }
         let dir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".config/typefish")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("dictionary.json")
-    }()
+    }
 
     private static func timestamp() -> String {
         ISO8601DateFormatter().string(from: Date())
     }
 
     /// Load dictionary from disk. Creates with defaults if file doesn't exist.
-    static func load() -> CustomDictionary {
-        guard let data = try? Data(contentsOf: fileURL),
+    static func load(from url: URL = fileURL) -> CustomDictionary {
+        guard let data = try? Data(contentsOf: url),
               let dict = try? JSONDecoder().decode(CustomDictionary.self, from: data) else {
-            let dict = loadDefaults()
+            var dict = loadDefaults()
+            dict.storageURL = url
             dict.save()
             Log.info("📖 Created dictionary: \(dict.hints.count) hints, \(dict.replacements.count) replacements, \(dict.vocabulary.count) vocab")
             return dict
         }
         Log.info("📖 Dictionary: \(dict.hints.count) hints, \(dict.replacements.count) replacements, \(dict.vocabulary.count) vocab")
         var sanitized = dict
-        if sanitized.sanitizeReplacements() {
-            sanitized.save()
+        sanitized.storageURL = url
+        let removedGarbage = sanitized.sanitizeReplacements()
+        let migratedLegacyLearnedRules = sanitized.migrateLegacyAutoLearnedReplacements()
+        if removedGarbage || migratedLegacyLearnedRules {
+            if !sanitized.save(to: url) { Log.info("Dictionary migration will be retried on reload") }
         }
         return sanitized
     }
@@ -131,7 +162,7 @@ struct CustomDictionary: Codable {
             "i", "me", "you", "us", "them"
         ]
 
-        for (wrong, right) in replacements {
+        for (wrong, right) in replacements where metadata(for: wrong).source == .autoLearned {
             let lowerRight = right.lowercased()
             let lowerWrong = wrong.lowercased()
 
@@ -184,12 +215,47 @@ struct CustomDictionary: Codable {
         return !removed.isEmpty
     }
 
+    /// Convert explicitly auto-learned global replacements into spelling guidance.
+    /// Legacy rules without provenance remain imported and retain their behavior.
+    @discardableResult
+    mutating func migrateLegacyAutoLearnedReplacements() -> Bool {
+        let learnedRules = replacements.filter { metadata(for: $0.key).source == .autoLearned }
+        guard !learnedRules.isEmpty else { return false }
+
+        for (wrong, right) in learnedRules {
+            let isAlreadyHinted = uniqueStrings(learnedSpellingPreferences.map(\.phrase) + hints)
+                .contains { $0.compare(right, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame }
+            if !isAlreadyHinted {
+                learnedSpellingPreferences.append(
+                    LearnedSpellingPreference(id: UUID(), phrase: right, createdAt: Self.timestamp())
+                )
+            }
+            replacements.removeValue(forKey: wrong)
+            replacementMetadata.removeValue(forKey: wrong)
+        }
+
+        return true
+    }
+
     /// Save to disk (pretty-printed for easy editing)
-    func save() {
+    @discardableResult
+    mutating func save(to url: URL? = nil) -> Bool {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(self) else { return }
-        try? data.write(to: CustomDictionary.fileURL)
+        guard let data = try? encoder.encode(self) else { return false }
+        let destination = url ?? storageURL
+        do {
+            try FileManager.default.createDirectory(
+                at: destination.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try data.write(to: destination, options: .atomic)
+            storageURL = destination
+            return true
+        } catch {
+            Log.info("⚠️ Failed to save dictionary: \(error.localizedDescription)")
+            return false
+        }
     }
 
     // MARK: - Whisper Hints (spelling guide format)
@@ -198,7 +264,8 @@ struct CustomDictionary: Codable {
     /// OpenAI recommends this over plain word lists.
     /// Groq limit: 896 characters.
     func whisperPrompt() -> String? {
-        guard !hints.isEmpty else { return nil }
+        let promptHints = prioritizedSpellingHints()
+        guard !promptHints.isEmpty else { return nil }
 
         // Spelling guide format — Whisper mimics the style of the prompt
         let prefix = "Spelling guide: "
@@ -207,9 +274,9 @@ struct CustomDictionary: Codable {
         var words: [String] = []
         var charCount = 0
 
-        for hint in hints {
+        for hint in promptHints {
             let addition = words.isEmpty ? hint : ", \(hint)"
-            if charCount + addition.count > maxChars { break }
+            if charCount + addition.count > maxChars { continue }
             words.append(hint)
             charCount += addition.count
         }
@@ -225,8 +292,8 @@ struct CustomDictionary: Codable {
             prompt = String(prompt.prefix(896))
         }
 
-        if words.count < hints.count {
-            Log.info("📖 Whisper hints: \(words.count)/\(hints.count) (\(prompt.count) chars)")
+        if words.count < promptHints.count {
+            Log.info("📖 Whisper hints: \(words.count)/\(promptHints.count) (\(prompt.count) chars)")
         }
 
         return prompt
@@ -275,16 +342,28 @@ struct CustomDictionary: Codable {
     /// Includes all hints + vocabulary + replacement targets.
     /// The LLM can use these to fix spelling that Whisper and replacements missed.
     func polisherReference() -> String? {
-        // Collect all "correct" words from all sources
-        var allWords = Set<String>()
-        allWords.formUnion(hints)
-        allWords.formUnion(vocabulary)
-        allWords.formUnion(replacements.values)  // The "right" side of replacements
+        let learned = learnedSpellingPreferences.reversed().map(\.phrase)
+        let remaining = (hints + vocabulary + Array(replacements.values)).sorted()
+        let words = uniqueStrings(learned + remaining)
+        guard !words.isEmpty else { return nil }
 
-        let sorted = allWords.sorted()
-        guard !sorted.isEmpty else { return nil }
+        return "Known terms and correct spellings: " + words.joined(separator: ", ")
+    }
 
-        return "Known terms and correct spellings: " + sorted.joined(separator: ", ")
+    private func prioritizedSpellingHints() -> [String] {
+        uniqueStrings(learnedSpellingPreferences.reversed().map(\.phrase) + hints)
+    }
+
+    private func uniqueStrings(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values.compactMap { value in
+            let key = value.trimmingCharacters(in: .whitespacesAndNewlines).folding(
+                options: [.caseInsensitive, .diacriticInsensitive],
+                locale: Locale(identifier: "en_US_POSIX")
+            )
+            guard !key.isEmpty, seen.insert(key).inserted else { return nil }
+            return value.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
     }
 
     // MARK: - Add entries
@@ -296,6 +375,80 @@ struct CustomDictionary: Codable {
         hints.append(trimmed)
         if persist { save() }
         Log.info("📖 Added hint: \(trimmed)")
+    }
+
+    @discardableResult
+    mutating func addLearnedSpellingPreference(
+        _ phrase: String,
+        persist: Bool = true
+    ) -> LearnedSpellingPreference? {
+        let trimmed = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let key = trimmed.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+        let alreadyPresent = learnedSpellingPreferences.contains {
+            $0.phrase.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX")) == key
+        }
+        guard !alreadyPresent else { return nil }
+
+        let preference = LearnedSpellingPreference(id: UUID(), phrase: trimmed, createdAt: Self.timestamp())
+        learnedSpellingPreferences.append(preference)
+        if persist, !save() {
+            learnedSpellingPreferences.removeAll { $0.id == preference.id }
+            return nil
+        }
+        Log.info("📖 Added learned spelling preference: \(trimmed)")
+        return preference
+    }
+
+    /// Remove only the exact learned record returned by `addLearnedSpellingPreference`.
+    /// Missing records are already undone. Changed records are preserved.
+    @discardableResult
+    mutating func undoLearnedSpellingPreference(
+        _ preference: LearnedSpellingPreference,
+        persist: Bool = true
+    ) -> Bool {
+        guard let index = learnedSpellingPreferences.firstIndex(where: { $0.id == preference.id }) else {
+            return true
+        }
+        guard learnedSpellingPreferences[index] == preference else { return false }
+        learnedSpellingPreferences.remove(at: index)
+        if persist, !save() {
+            learnedSpellingPreferences.insert(preference, at: index)
+            return false
+        }
+        Log.info("📖 Undid learned spelling preference: \(preference.phrase)")
+        return true
+    }
+
+    @discardableResult
+    mutating func updateLearnedSpellingPreference(
+        _ preference: LearnedSpellingPreference,
+        phrase: String,
+        persist: Bool = true
+    ) -> LearnedSpellingPreference? {
+        let trimmed = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = learnedSpellingPreferences.firstIndex(where: { $0.id == preference.id }),
+              learnedSpellingPreferences[index] == preference else {
+            return nil
+        }
+
+        let key = trimmed.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+        let duplicatesAnotherPreference = learnedSpellingPreferences.enumerated().contains { candidateIndex, candidate in
+            candidateIndex != index
+                && candidate.phrase.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX")) == key
+        }
+        guard !duplicatesAnotherPreference else { return nil }
+
+        learnedSpellingPreferences[index].phrase = trimmed
+        learnedSpellingPreferences[index].updatedAt = Self.timestamp()
+        let updated = learnedSpellingPreferences[index]
+        if persist, !save() {
+            learnedSpellingPreferences[index] = preference
+            return nil
+        }
+        Log.info("📖 Updated learned spelling preference: \(preference.phrase) → \(trimmed)")
+        return updated
     }
 
     mutating func updateHint(oldValue: String, newValue: String, persist: Bool = true) {

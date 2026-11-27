@@ -269,10 +269,10 @@ class OverlayPanel {
     
     /// Show a brief notification when a dictionary correction is auto-learned.
     /// Includes an Undo button to revert the addition.
-    func showAutoLearn(wrong: String, right: String, onUndo: @escaping () -> Void) {
+    func showLearnedSpelling(_ term: String, onUndo: @escaping () -> Void) {
         DispatchQueue.main.async { [weak self] in
-            Log.info("📝 Auto-learn overlay requested: \(wrong) → \(right)")
-            self?.presentLearnNotification(wrong: wrong, right: right, onUndo: onUndo)
+            Log.info("📝 Learned spelling notification requested")
+            self?.presentLearnNotification(term, onUndo: onUndo)
         }
     }
 
@@ -281,11 +281,11 @@ class OverlayPanel {
         return (window?.isVisible == true, window?.alphaValue ?? 0, window?.frame)
     }
     
-    private func presentLearnNotification(wrong: String, right: String, onUndo: @escaping () -> Void) {
+    private func presentLearnNotification(_ term: String, onUndo: @escaping () -> Void) {
         // Dismiss any existing learn notification
         dismissLearnWindow()
         
-        let text = "📝  \(wrong) → \(right)  已加入字典"
+        let text = "已记住拼写  \(term)"
         let font = NSFont.systemFont(ofSize: 12, weight: .medium)
         
         // Calculate width from text

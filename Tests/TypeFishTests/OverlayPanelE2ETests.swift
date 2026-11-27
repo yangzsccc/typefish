@@ -10,7 +10,7 @@ final class OverlayPanelE2ETests: XCTestCase {
 
         let overlay = OverlayPanel()
         try runOnMainThread {
-            overlay.showAutoLearn(wrong: "cloud", right: "Claude", onUndo: {})
+            overlay.showLearnedSpelling("Claude Code", onUndo: {})
         }
 
         RunLoop.current.run(until: Date().addingTimeInterval(0.6))
@@ -29,13 +29,15 @@ final class OverlayPanelE2ETests: XCTestCase {
         }
         XCTAssertFalse(matchingWindows.isEmpty)
 
-        try? Self.captureScreen(path: "/tmp/typefish-autolearn-overlay-e2e.png")
+        if let windowID = matchingWindows.first?[kCGWindowNumber as String] as? Int {
+            try Self.captureWindow(id: windowID, path: "/tmp/typefish-autolearn-overlay-e2e.png")
+        }
     }
 
-    private static func captureScreen(path: String) throws {
+    private static func captureWindow(id: Int, path: String) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        process.arguments = ["-x", path]
+        process.arguments = ["-x", "-l", String(id), path]
         try process.run()
         process.waitUntilExit()
         XCTAssertEqual(process.terminationStatus, 0)

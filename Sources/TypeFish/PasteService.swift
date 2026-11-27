@@ -19,7 +19,19 @@ enum PasteService {
     /// Returns true if paste was likely successful (a text field was focused).
     @discardableResult
     static func paste(_ text: String) -> Bool {
-        guard !text.isEmpty else { return false }
+        pasteImpl(text, captureForLearning: false).pasted
+    }
+
+    /// Pastes text and returns a pre-paste witness for asynchronous confirmation.
+    static func pasteForLearning(_ text: String) -> (pasted: Bool, pending: PendingPasteCapture?) {
+        pasteImpl(text, captureForLearning: true)
+    }
+
+    private static func pasteImpl(
+        _ text: String,
+        captureForLearning: Bool
+    ) -> (pasted: Bool, pending: PendingPasteCapture?) {
+        guard !text.isEmpty else { return (false, nil) }
         
         // Check if there's a focused text input BEFORE pasting
         let hasTextInput = checkForTextInput()
@@ -31,35 +43,59 @@ enum PasteService {
         // Write our text to pasteboard
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+        let writtenChangeCount = pasteboard.changeCount
         
-        if hasTextInput {
-            // Activate the saved app (the one user was typing in)
-            if let app = savedApp {
+        if hasTextInput, let app = savedApp {
+            if shouldActivateSavedApp(
+                frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                targetPID: app.processIdentifier
+            ) {
                 app.activate()
-                Log.info("📌 Activated: \(app.localizedName ?? "unknown")")
-                usleep(150_000)  // 150ms
+                usleep(150_000)
+            }
+
+            let pendingCapture: PendingPasteCapture?
+            if captureForLearning {
+                pendingCapture = PendingPasteCapture.capture(
+                    application: app,
+                    insertedText: text
+                )
             } else {
-                usleep(50_000)  // 50ms
+                pendingCapture = nil
             }
             
-            // Simulate Cmd+V
-            simulatePaste()
+            guard postCommandKey(9, to: app) else {
+                Log.info("Paste destination unavailable. Text is on the clipboard.")
+                return (false, nil)
+            }
             
             // Restore previous pasteboard content after a delay
             if let previous = previousContents {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    guard shouldRestorePasteboard(
+                        currentChangeCount: pasteboard.changeCount,
+                        writtenChangeCount: writtenChangeCount
+                    ) else { return }
                     pasteboard.clearContents()
                     pasteboard.setString(previous, forType: .string)
                 }
             }
             
             Log.info("📋 Pasted \(text.count) chars to cursor")
-            return true
+            return (true, pendingCapture)
         } else {
             // No text input found — text stays on clipboard
             Log.info("📋 No text input focused — copied \(text.count) chars to clipboard")
-            return false
+            return (false, nil)
         }
+    }
+
+    static func shouldActivateSavedApp(frontmostPID: pid_t?, targetPID: pid_t) -> Bool {
+        frontmostPID != targetPID
+    }
+
+    static func shouldRestorePasteboard(currentChangeCount: Int, writtenChangeCount: Int) -> Bool {
+        currentChangeCount == writtenChangeCount
     }
     
     /// Check if there's likely a place to paste.
@@ -87,46 +123,27 @@ enum PasteService {
         return true
     }
     
-    /// Simulate Cmd+V keypress
-    private static func simulatePaste() {
-        // Key code 9 = 'V'
+    private static func postCommandKey(_ keyCode: CGKeyCode, to app: NSRunningApplication) -> Bool {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else { return false }
         let source = CGEventSource(stateID: .hidSystemState)
-        
-        // Cmd+V down
-        if let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true) {
-            keyDown.flags = .maskCommand
-            keyDown.post(tap: .cghidEventTap)
-        }
-        
-        // Small delay between down and up
-        usleep(10_000)  // 10ms
-        
-        // Cmd+V up
-        if let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false) {
-            keyUp.flags = .maskCommand
-            keyUp.post(tap: .cghidEventTap)
-        }
-    }
-    
-    /// Simulate Cmd+Z (Undo) in the target app
-    static func undo() {
-        // Activate the target app first
-        if let app = savedApp {
-            app.activate(options: [])
-            usleep(50_000)  // 50ms
-        }
-        
-        let source = CGEventSource(stateID: .hidSystemState)
-        
-        // Key code 6 = 'Z'
-        if let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 6, keyDown: true) {
-            keyDown.flags = .maskCommand
-            keyDown.post(tap: .cghidEventTap)
-        }
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else { return false }
+        down.flags = .maskCommand
+        up.flags = .maskCommand
+        // Deliver the shortcut to the active login session after confirming its foreground app.
+        down.post(tap: .cgSessionEventTap)
         usleep(10_000)
-        if let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 6, keyDown: false) {
-            keyUp.flags = .maskCommand
-            keyUp.post(tap: .cghidEventTap)
+        up.post(tap: .cgSessionEventTap)
+        return true
+    }
+
+    /// Simulate Cmd+Z in the app that received the dictation.
+    static func undo() {
+        guard let app = savedApp else { return }
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != app.processIdentifier {
+            app.activate()
+            usleep(50_000)
         }
+        _ = postCommandKey(6, to: app)
     }
 }

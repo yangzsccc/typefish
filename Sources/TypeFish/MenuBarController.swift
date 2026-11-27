@@ -32,6 +32,7 @@ class MenuBarController {
 
     private var statusItem: NSStatusItem!
     private let state: AppState
+    var onOpenMainWindow: (() -> Void)?
 
     init(state: AppState) {
         self.state = state
@@ -75,6 +76,12 @@ class MenuBarController {
         let escItem = NSMenuItem(title: "⎋ Esc — Cancel Recording", action: nil, keyEquivalent: "")
         escItem.isEnabled = false
         menu.addItem(escItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let openWindowItem = NSMenuItem(title: "Open TypeFish...", action: #selector(openMainWindow), keyEquivalent: "")
+        openWindowItem.target = self
+        menu.addItem(openWindowItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -231,6 +238,10 @@ class MenuBarController {
     }
 
     // MARK: - Dictionary Actions
+
+    @objc private func openMainWindow() {
+        onOpenMainWindow?()
+    }
 
     @objc private func addWord() {
         let alert = NSAlert()

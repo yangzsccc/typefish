@@ -42,6 +42,7 @@ class AppState: ObservableObject {
     private var dictFileMonitor: DispatchSourceFileSystemObject?
 
     /// Safety timeout to prevent permanent processing stuck
+    private var recordingID = UUID()
     private var processingTimeout: Timer?
     private let maxProcessingTime: TimeInterval = 30
 
@@ -56,9 +57,9 @@ class AppState: ObservableObject {
     /// Callback to update menu bar icon
     var onStateChange: (() -> Void)?
 
-    init() {
+    init(recorder: AudioRecorder = AudioRecorder()) {
         self.config = AppConfig.load()
-        self.recorder = AudioRecorder()
+        self.recorder = recorder
         self.recorder.preferredMicrophone = config.preferredMicrophone
         // Lock preferred mic as system default BEFORE any engine access
         // This prevents Bluetooth headphones from being activated as input
@@ -182,7 +183,8 @@ class AppState: ObservableObject {
         }
 
         // Stop any edit tracking from previous recording
-        EditTracker.shared.stopTracking()
+        recordingID = UUID()
+        MainActor.assumeIsolated { EditTracker.shared.stopTracking() }
 
         // Save reference to the app user is typing in BEFORE we do anything
         PasteService.saveFrontmostApp()
@@ -224,6 +226,7 @@ class AppState: ObservableObject {
     private func stopAndProcess() {
         // Update UI immediately on stop press
         isRecording = false
+        isProcessing = true
         stopSound?.play()
         statusText = "⏳ Processing..."
         onStateChange?()
@@ -241,7 +244,9 @@ class AppState: ObservableObject {
     }
 
     private func finalizeRecording() {
+        let id = recordingID
         guard let audioURL = recorder.stopRecording() else {
+            isProcessing = false
             Log.info("⚠️ No audio file from recording")
             statusText = "Ready"
             onStateChange?()
@@ -250,6 +255,7 @@ class AppState: ObservableObject {
 
         // Check if audio was silence (prevent Whisper hallucination)
         if recorder.wasSilent() {
+            isProcessing = false
             statusText = "🔇 No speech"
             onStateChange?()
             overlay.dismiss()
@@ -289,10 +295,11 @@ class AppState: ObservableObject {
 
         overlay.showProcessing()
 
-        // Safety: force-reset after 60s to prevent permanent stuck
+        // Refuse to paste a late result once this recording times out.
         processingTimeout?.invalidate()
         processingTimeout = Timer.scheduledTimer(withTimeInterval: maxProcessingTime, repeats: false) { [weak self] _ in
-            guard let self = self, self.isProcessing else { return }
+            guard let self = self, self.recordingID == id, self.isProcessing else { return }
+            self.recordingID = UUID()
             Log.info("⚠️ Processing timeout (\(Int(self.maxProcessingTime))s) — force resetting")
             self.isProcessing = false
             self.statusText = "⚠️ Timeout"
@@ -331,7 +338,9 @@ class AppState: ObservableObject {
         metrics.polishModel = self.config.polisherModel
 
         // Pipeline: Transcribe/Translate → Polish → Paste (or AI Command)
-        let vocabPrompt = dictionary.whisperPrompt()
+        // Persist one vocabulary snapshot across the asynchronous transcription and polish callbacks.
+        let recordingDictionary = dictionary
+        let vocabPrompt = recordingDictionary.whisperPrompt()
         let isTranslating = self.translateMode
 
         let whisperCallback: (String) -> Void = { [weak self] rawText in
@@ -344,6 +353,7 @@ class AppState: ObservableObject {
                 metrics.totalTimeMs = Int((CFAbsoluteTimeGetCurrent() - pipelineStartTime) * 1000)
                 MetricsLogger.log(metrics)
                 DispatchQueue.main.async {
+                    guard self.recordingID == id, self.isProcessing else { return }
                     self.isProcessing = false
                     self.statusText = "❌ No speech detected"
                     self.onStateChange?()
@@ -362,6 +372,7 @@ class AppState: ObservableObject {
                 metrics.totalTimeMs = Int((CFAbsoluteTimeGetCurrent() - pipelineStartTime) * 1000)
                 MetricsLogger.log(metrics)
                 DispatchQueue.main.async {
+                    guard self.recordingID == id, self.isProcessing else { return }
                     self.isProcessing = false
                     self.statusText = "🔇 No speech detected"
                     self.onStateChange?()
@@ -376,11 +387,12 @@ class AppState: ObservableObject {
             let whisperRawText = rawText
 
             // Apply dictionary replacements
-            let correctedText = self.dictionary.applyReplacements(rawText)
+            let correctedText = recordingDictionary.applyReplacements(rawText)
 
             // === AI Command Mode: branch here ===
             if isCommandMode {
                 DispatchQueue.main.async {
+                    guard self.recordingID == id, self.isProcessing else { return }
                     self.statusText = "🤖 AI generating..."
                     self.onStateChange?()
 
@@ -408,6 +420,7 @@ class AppState: ObservableObject {
                     MetricsLogger.log(metrics)
 
                     DispatchQueue.main.async {
+                        guard self.recordingID == id, self.isProcessing else { return }
                         guard let generated = result, !generated.isEmpty else {
                             self.isProcessing = false
                             self.statusText = "❌ AI failed"
@@ -456,13 +469,14 @@ class AppState: ObservableObject {
             }
 
             DispatchQueue.main.async {
+                guard self.recordingID == id, self.isProcessing else { return }
                 self.statusText = "✨ Polishing..."
                 self.onStateChange?()
             }
 
             // Build polisher prompt with dictionary reference + field context + app tone
             var fullSystemPrompt = self.config.polisherSystemPrompt
-            if let ref = self.dictionary.polisherReference() {
+            if let ref = recordingDictionary.polisherReference() {
                 fullSystemPrompt += "\n\n" + ref
             }
             if let toneMod = AppToneAdapter.tonePromptModifier() {
@@ -485,9 +499,10 @@ class AppState: ObservableObject {
                 systemPrompt: fullSystemPrompt
             ) { polishedText in
                 DispatchQueue.main.async {
+                    guard self.recordingID == id, self.isProcessing else { return }
                     // Apply reverse replacements AFTER polishing
                     // Catches cases where polisher translates English to Chinese
-                    let finalText = self.dictionary.applyReplacements(polishedText)
+                    let finalText = recordingDictionary.applyReplacements(polishedText)
                     metrics.polishTimeMs = Int((CFAbsoluteTimeGetCurrent() - polishStartTime) * 1000)
                     metrics.totalTimeMs = Int((CFAbsoluteTimeGetCurrent() - pipelineStartTime) * 1000)
 
@@ -505,7 +520,7 @@ class AppState: ObservableObject {
                     }
 
                     // Try to paste to cursor
-                    let pasted = PasteService.paste(finalText)
+                    let (pasted, pending) = PasteService.pasteForLearning(finalText)
                     metrics.success = true
                     MetricsLogger.log(metrics)
 
@@ -527,6 +542,7 @@ class AppState: ObservableObject {
                         if let key = self.groqAPIKey {
                             EditTracker.shared.startTracking(
                                 pastedText: finalText,
+                                pending: pending,
                                 apiKey: key,
                                 appState: self
                             )
@@ -664,34 +680,27 @@ class AppState: ObservableObject {
     // MARK: - Dictionary File Watching
 
     private func watchDictionaryFile() {
-        let path = CustomDictionary.fileURL.path
-        let fd = open(path, O_EVTONLY)
-        guard fd >= 0 else {
-            Log.info("⚠️ Cannot watch dictionary file")
-            return
-        }
-
+        let url = CustomDictionary.fileURL
+        let fd = open(url.deletingLastPathComponent().path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        // Atomic saves replace the file's inode. The containing directory survives each save.
         let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd,
-            eventMask: [.write, .rename, .delete],
-            queue: .main
+            fileDescriptor: fd, eventMask: [.write, .rename], queue: .main
         )
-
+        var previousData = try? Data(contentsOf: url)
         source.setEventHandler { [weak self] in
-            // Small delay to let file writes complete
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                self?.dictionary = CustomDictionary.load()
-            }
+            guard let self, let data = try? Data(contentsOf: url), data != previousData,
+                  (try? JSONDecoder().decode(CustomDictionary.self, from: data)) != nil else { return }
+            previousData = data
+            self.dictionary = CustomDictionary.load(from: url)
+            self.onStateChange?()
         }
-
-        source.setCancelHandler {
-            close(fd)
-        }
-
+        source.setCancelHandler { close(fd) }
+        dictFileMonitor = source
         source.resume()
-        self.dictFileMonitor = source
-        Log.info("👁️ Watching dictionary file for changes")
     }
+
+    deinit { dictFileMonitor?.cancel() }
 
     // MARK: - Sound Loading
 

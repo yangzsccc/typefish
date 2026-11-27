@@ -2,6 +2,8 @@
 
 Date: 2026-05-09
 
+This study describes the May 2026 implementation. The [input support report](auto-correction-input-support.md) covers the v2.6.0 implementation and tests.
+
 ## Goal
 
 TypeFish should learn from a user's manual edits after paste, without requiring a manual hotkey, across common macOS input surfaces:

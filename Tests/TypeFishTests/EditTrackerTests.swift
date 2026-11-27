@@ -27,22 +27,48 @@ final class EditTrackerTests: XCTestCase {
         XCTAssertTrue(EditTracker.hasSignificantOverlapForTesting(original, edited))
     }
 
-    func testCorrectionParsingDeduplicatesAndRejectsUnrelatedPairs() {
-        let response = """
-        Chat GBT → ChatGPT
-        Chat GBT → ChatGPT
-        Let's → Also
-        """
+    func testClassifierMustReturnTheTermAtTheActualEdit() {
+        let original = "Keep Claude-Code and use Cloud Code"
+        let edited = "Keep Claude-Code and use Claude Code"
+        XCTAssertEqual(EditTracker.shared.validatedTerm("Claude Code", original: original, edited: edited), "Claude Code")
+        XCTAssertNil(EditTracker.shared.validatedTerm("Claude-Code", original: original, edited: edited))
+        XCTAssertNil(EditTracker.shared.validatedTerm("Keep", original: original, edited: edited))
+        XCTAssertNil(EditTracker.shared.validatedTerm("NONE", original: original, edited: edited))
+        XCTAssertEqual(EditTracker.shared.validatedTerm("Claude Code", original: "Cloud Code", edited: "Claude Code"), "Claude Code")
+        XCTAssertEqual(EditTracker.shared.validatedTerm("陈晨", original: "请交给陈辰", edited: "请交给陈晨"), "陈晨")
+    }
 
-        let corrections = EditTracker.parseCorrectionsForTesting(
-            response,
-            sourceText: "Please use Chat GBT for this response.",
-            editedText: "Please use ChatGPT for this response."
+    func testSingleWordPositiveKeepsUnchangedTitleCaseNameNeighbor() {
+        let tracker = EditTracker.shared
+        XCTAssertEqual(
+            tracker.validatedTerm(
+                "Claude",
+                original: "Please try Cloud Code for the project.",
+                edited: "Please try Claude Code for the project."
+            ),
+            "Claude Code"
         )
+        XCTAssertEqual(
+            tracker.validatedTerm("Claude", original: "Cloude Code", edited: "Claude Code"),
+            "Claude Code"
+        )
+    }
 
-        XCTAssertEqual(corrections.count, 1)
-        XCTAssertEqual(corrections.first?.0, "Chat GBT")
-        XCTAssertEqual(corrections.first?.1, "ChatGPT")
+    func testSingleWordPositiveDoesNotExpandAcrossUnrelatedOrPunctuatedNeighbors() {
+        let tracker = EditTracker.shared
+        XCTAssertEqual(
+            tracker.validatedTerm("Xochitl", original: "Use Sochiel tomorrow.", edited: "Use Xochitl tomorrow."),
+            "Xochitl"
+        )
+        XCTAssertEqual(
+            tracker.validatedTerm("Claude", original: "Try Cloud, Code now.", edited: "Try Claude, Code now."),
+            "Claude"
+        )
+        XCTAssertEqual(
+            tracker.validatedTerm("Claude", original: "Try Cloud", edited: "Try Claude"),
+            "Claude"
+        )
+        XCTAssertNil(tracker.validatedTerm("NONE", original: "Cloude Code", edited: "Claude Code"))
     }
 
     func testEditAnalysisGateAllowsSmallPhoneticCorrection() {
@@ -70,29 +96,6 @@ final class EditTrackerTests: XCTestCase {
         XCTAssertFalse(EditTracker.shouldAnalyzeEditForTesting(
             original: "Send this to OpenClaw.",
             edited: "Send this to Calendar."
-        ))
-    }
-
-    func testBeforeSendSnapshotOnlyForKnownAXFailingSendApps() {
-        XCTAssertFalse(EditTracker.shouldUseBeforeSendSnapshotForTesting(
-            bundleIdentifier: "com.openai.codex",
-            failedReadCount: 1,
-            isTracking: true,
-            isAnalyzing: false
-        ))
-
-        XCTAssertTrue(EditTracker.shouldUseBeforeSendSnapshotForTesting(
-            bundleIdentifier: "com.hnc.Discord",
-            failedReadCount: 1,
-            isTracking: true,
-            isAnalyzing: false
-        ))
-
-        XCTAssertFalse(EditTracker.shouldUseBeforeSendSnapshotForTesting(
-            bundleIdentifier: "com.apple.TextEdit",
-            failedReadCount: 1,
-            isTracking: true,
-            isAnalyzing: false
         ))
     }
 

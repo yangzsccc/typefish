@@ -12,7 +12,7 @@ enum EditCaptureMode: String, Equatable {
     }
 }
 
-enum EditMirrorEvent {
+enum EditMirrorEvent: Equatable {
     case text(String)
     case leftArrow
     case rightArrow
@@ -195,4 +195,3 @@ struct EditMirrorBuffer {
         return true
     }
 }
-

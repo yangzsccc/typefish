@@ -3,6 +3,7 @@ import AppKit
 // MARK: - App Delegate
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    static let defaultActivationPolicy: NSApplication.ActivationPolicy = .accessory
     
     var state: AppState!
     var menuBar: MenuBarController!
@@ -13,8 +14,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Log.rotate()
         Log.info("🐟 TypeFish starting...")
         
-        // Show in Dock so user can find and restart the app easily
-        NSApp.setActivationPolicy(.regular)
+        // Keep TypeFish as a menu bar app so it does not compete with the target app for focus.
+        NSApp.setActivationPolicy(Self.defaultActivationPolicy)
         NSApp.mainMenu = ApplicationMenuFactory.makeMainMenu()
         
         // Initialize state
@@ -32,6 +33,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Set up main window (shown when clicking Dock icon)
         mainWindow = MainWindow(state: state)
+        menuBar.onOpenMainWindow = { [weak self] in
+            self?.mainWindow.showWindow()
+        }
         
         // Set up global hotkey
         hotkeyManager = HotkeyManager()

@@ -1,13 +1,25 @@
 import AppKit
 import Carbon
 
-/// Global hotkey manager using CGEvent tap.
-/// Listens for Option+Space to toggle recording.
-/// Swallows the event so it doesn't trigger Spotlight or other system actions.
+enum HotkeyEventTapDecision: Equatable {
+    case passThrough
+    case cancelAndPassThrough
+    case replayedTrackedEnter
+    case interceptTrackedEnter
+    case trackAndPassThrough(EditMirrorEvent, triggerEnter: Bool)
+}
+
+/// Global hotkey manager.
+/// Uses Carbon registered hotkeys for TypeFish shortcuts, and enables a short-lived
+/// CGEvent tap only while EditTracker is observing post-paste corrections.
 class HotkeyManager {
     
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var hotkeyHandler: EventHandlerRef?
+    private var hotkeyRefs: [EventHotKeyRef] = []
+    private var globalKeyMonitor: Any?
+    private var localKeyMonitor: Any?
     
     /// Called when the hotkey is pressed (Option+Space)
     var onToggle: (() -> Void)?
@@ -37,12 +49,28 @@ class HotkeyManager {
     var shouldInterceptEnterForEditTracking: (() -> Bool)?
     
     /// Flag to enable/disable keypress tracking for EditTracker
-    var isTrackingEdits: Bool = false
+    var isTrackingEdits: Bool = false {
+        didSet {
+            guard oldValue != isTrackingEdits else { return }
+            if isTrackingEdits {
+                startEditEventTapIfNeeded()
+            } else {
+                stopEditEventTap()
+            }
+        }
+    }
 
     private var isReplayingTrackedEnter = false
     
     // Singleton needed because CGEvent tap callback is a C function pointer
     static var shared: HotkeyManager?
+    private static let hotkeySignature: OSType = 0x54594648 // "TYFH"
+
+    private enum RegisteredHotkey: UInt32 {
+        case toggleRecording = 1
+        case translateToggle = 2
+        case commandToggle = 3
+    }
     
     func start() {
         HotkeyManager.shared = self
@@ -59,7 +87,120 @@ class HotkeyManager {
             Log.info("✅ Accessibility permission granted")
         }
         
-        // Create event tap for key down events
+        installRegisteredHotkeys()
+        startPassiveEscapeMonitor()
+
+        Log.info("✅ Hotkey active: Option+Space to toggle recording")
+    }
+
+    private func installRegisteredHotkeys() {
+        guard hotkeyHandler == nil else { return }
+
+        var eventType = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+
+        let handlerStatus = InstallEventHandler(
+            GetApplicationEventTarget(),
+            HotkeyManager.registeredHotkeyCallback,
+            1,
+            &eventType,
+            nil,
+            &hotkeyHandler
+        )
+
+        guard handlerStatus == noErr else {
+            Log.info("❌ Failed to install Carbon hotkey handler: \(handlerStatus)")
+            return
+        }
+
+        registerHotkey(.toggleRecording, modifiers: UInt32(optionKey))
+        registerHotkey(.translateToggle, modifiers: UInt32(controlKey | optionKey))
+        registerHotkey(.commandToggle, modifiers: UInt32(controlKey | optionKey | cmdKey))
+    }
+
+    private func registerHotkey(_ hotkey: RegisteredHotkey, modifiers: UInt32) {
+        let hotkeyID = EventHotKeyID(signature: Self.hotkeySignature, id: hotkey.rawValue)
+        var ref: EventHotKeyRef?
+        let status = RegisterEventHotKey(
+            UInt32(kVK_Space),
+            modifiers,
+            hotkeyID,
+            GetApplicationEventTarget(),
+            0,
+            &ref
+        )
+
+        if status == noErr, let ref {
+            hotkeyRefs.append(ref)
+        } else {
+            Log.info("❌ Failed to register hotkey \(hotkey): \(status)")
+        }
+    }
+
+    private static let registeredHotkeyCallback: EventHandlerUPP = { _, event, _ in
+        guard let event else { return noErr }
+
+        var hotkeyID = EventHotKeyID()
+        let status = GetEventParameter(
+            event,
+            EventParamName(kEventParamDirectObject),
+            EventParamType(typeEventHotKeyID),
+            nil,
+            MemoryLayout<EventHotKeyID>.size,
+            nil,
+            &hotkeyID
+        )
+
+        guard status == noErr, hotkeyID.signature == HotkeyManager.hotkeySignature else {
+            return noErr
+        }
+
+        DispatchQueue.main.async {
+            HotkeyManager.shared?.handleRegisteredHotkey(id: hotkeyID.id)
+        }
+
+        return noErr
+    }
+
+    private func handleRegisteredHotkey(id: UInt32) {
+        guard let hotkey = RegisteredHotkey(rawValue: id) else { return }
+
+        switch hotkey {
+        case .toggleRecording:
+            onToggle?()
+        case .translateToggle:
+            onTranslateToggle?()
+        case .commandToggle:
+            onCommandToggle?()
+        }
+    }
+
+    private func startPassiveEscapeMonitor() {
+        guard globalKeyMonitor == nil, localKeyMonitor == nil else { return }
+
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.handlePassiveKey(event)
+        }
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.handlePassiveKey(event)
+            return event
+        }
+    }
+
+    private func handlePassiveKey(_ event: NSEvent) {
+        let meaningful = event.modifierFlags.intersection([.command, .shift, .control, .option])
+        guard event.keyCode == 53, meaningful.isEmpty else { return }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.onCancel?()
+        }
+    }
+
+    private func startEditEventTapIfNeeded() {
+        guard eventTap == nil else { return }
+
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
@@ -68,16 +209,25 @@ class HotkeyManager {
             callback: HotkeyManager.eventTapCallback,
             userInfo: nil
         ) else {
-            Log.info("❌ Failed to create CGEvent tap. Check Accessibility permissions.")
+            Log.info("❌ Failed to create edit tracking CGEvent tap. Check Accessibility permissions.")
             return
         }
-        
+
         self.eventTap = tap
         self.runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
-        
-        Log.info("✅ Hotkey active: Option+Space to toggle recording")
+    }
+
+    private func stopEditEventTap() {
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+        }
+        if let source = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
+        }
+        eventTap = nil
+        runLoopSource = nil
     }
     
     /// C callback for CGEvent tap
@@ -94,78 +244,54 @@ class HotkeyManager {
             return Unmanaged.passRetained(event)
         }
         
+        guard let manager = HotkeyManager.shared else {
+            return Unmanaged.passRetained(event)
+        }
+
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
         let meaningful = NSEvent.ModifierFlags(rawValue: UInt(flags.rawValue))
             .intersection([.command, .shift, .control, .option])
-        
-        // Ctrl+Option+Cmd+Space — AI command mode
-        if meaningful == [.control, .option, .command] && keyCode == 49 {
-            DispatchQueue.main.async {
-                HotkeyManager.shared?.onCommandToggle?()
-            }
-            return nil  // Swallow the event
-        }
-        
-        // Ctrl+Option+Space (keyCode 49 = Space) — translate mode
-        if meaningful == [.control, .option] && keyCode == 49 {
-            DispatchQueue.main.async {
-                HotkeyManager.shared?.onTranslateToggle?()
-            }
-            return nil  // Swallow the event
-        }
-        
-        // Option+Space (keyCode 49 = Space) — normal transcribe
-        if meaningful == [.option] && keyCode == 49 {
-            DispatchQueue.main.async {
-                HotkeyManager.shared?.onToggle?()
-            }
-            return nil  // Swallow the event
-        }
-        
-        // Escape (keyCode 53) — cancel recording
-        if keyCode == 53 && meaningful.isEmpty {
+
+        let decision = eventTapDecision(
+            keyCode: keyCode,
+            characters: characters(from: event),
+            modifiers: meaningful,
+            isTrackingEdits: manager.isTrackingEdits,
+            isReplayingTrackedEnter: manager.isReplayingTrackedEnter,
+            shouldInterceptEnter: manager.shouldInterceptEnterForEditTracking?() == true
+        )
+
+        switch decision {
+        case .passThrough:
+            return Unmanaged.passRetained(event)
+
+        case .cancelAndPassThrough:
             DispatchQueue.main.async {
                 HotkeyManager.shared?.onCancel?()
             }
-            // Don't swallow Escape — let it propagate to other apps too
             return Unmanaged.passRetained(event)
-        }
-        
-        // Enter key (keyCode 36) — immediate analysis when tracking edits.
-        if keyCode == 36 && meaningful.isEmpty && HotkeyManager.shared?.isTrackingEdits == true {
-            if HotkeyManager.shared?.isReplayingTrackedEnter == true {
-                HotkeyManager.shared?.isReplayingTrackedEnter = false
-                return Unmanaged.passRetained(event)
-            }
 
-            if HotkeyManager.shared?.shouldInterceptEnterForEditTracking?() == true {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    HotkeyManager.shared?.onInterceptedEnterKey?()
+        case .replayedTrackedEnter:
+            manager.isReplayingTrackedEnter = false
+            return Unmanaged.passRetained(event)
+
+        case .interceptTrackedEnter:
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                HotkeyManager.shared?.onInterceptedEnterKey?()
+            }
+            return nil
+
+        case .trackAndPassThrough(let mirrorEvent, let triggerEnter):
+            DispatchQueue.main.async {
+                if triggerEnter {
+                    HotkeyManager.shared?.onEnterKey?()
                 }
-                return nil
-            }
-
-            DispatchQueue.main.async {
-                HotkeyManager.shared?.onEnterKey?()
-            }
-        }
-        
-        // If EditTracker is active, send the key details first, then fire the legacy callback.
-        if HotkeyManager.shared?.isTrackingEdits == true {
-            let characters = characters(from: event)
-            let mirrorEvent = EditMirrorEvent.fromKeyEvent(
-                keyCode: keyCode,
-                characters: characters,
-                modifiers: meaningful
-            )
-            DispatchQueue.main.async {
                 HotkeyManager.shared?.onTrackedKeyEvent?(mirrorEvent)
                 HotkeyManager.shared?.onAnyKeyPress?()
             }
+            return Unmanaged.passRetained(event)
         }
-        
-        return Unmanaged.passRetained(event)
     }
 
     func replayEnterForEditTracking() {
@@ -186,14 +312,28 @@ class HotkeyManager {
     }
     
     func stop() {
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
+        isTrackingEdits = false
+        stopEditEventTap()
+
+        for ref in hotkeyRefs {
+            UnregisterEventHotKey(ref)
         }
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
+        hotkeyRefs.removeAll()
+
+        if let handler = hotkeyHandler {
+            RemoveEventHandler(handler)
         }
-        eventTap = nil
-        runLoopSource = nil
+        hotkeyHandler = nil
+
+        if let monitor = globalKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+        if let monitor = localKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+        globalKeyMonitor = nil
+        localKeyMonitor = nil
+
         onInterceptedEnterKey = nil
         shouldInterceptEnterForEditTracking = nil
         onTrackedKeyEvent = nil
@@ -212,5 +352,81 @@ class HotkeyManager {
         )
         guard length > 0 else { return "" }
         return String(utf16CodeUnits: buffer, count: length)
+    }
+
+    static func eventTapDecisionForTesting(
+        keyCode: UInt16,
+        modifiers: NSEvent.ModifierFlags,
+        isTrackingEdits: Bool,
+        isReplayingTrackedEnter: Bool,
+        shouldInterceptEnter: Bool
+    ) -> HotkeyEventTapDecision {
+        eventTapDecision(
+            keyCode: keyCode,
+            characters: testCharacters(for: keyCode),
+            modifiers: modifiers,
+            isTrackingEdits: isTrackingEdits,
+            isReplayingTrackedEnter: isReplayingTrackedEnter,
+            shouldInterceptEnter: shouldInterceptEnter
+        )
+    }
+
+    private static func eventTapDecision(
+        keyCode: UInt16,
+        characters: String,
+        modifiers: NSEvent.ModifierFlags,
+        isTrackingEdits: Bool,
+        isReplayingTrackedEnter: Bool,
+        shouldInterceptEnter: Bool
+    ) -> HotkeyEventTapDecision {
+        if keyCode == 53 && modifiers.isEmpty {
+            return .cancelAndPassThrough
+        }
+
+        if isRegisteredSpaceHotkey(keyCode: keyCode, modifiers: modifiers) {
+            return .passThrough
+        }
+
+        guard isTrackingEdits else {
+            return .passThrough
+        }
+
+        if keyCode == 36 && modifiers.isEmpty {
+            if isReplayingTrackedEnter {
+                return .replayedTrackedEnter
+            }
+
+            if shouldInterceptEnter {
+                return .interceptTrackedEnter
+            }
+        }
+
+        let mirrorEvent = EditMirrorEvent.fromKeyEvent(
+            keyCode: keyCode,
+            characters: characters,
+            modifiers: modifiers
+        )
+        return .trackAndPassThrough(mirrorEvent, triggerEnter: keyCode == 36 && modifiers.isEmpty)
+    }
+
+    private static func testCharacters(for keyCode: UInt16) -> String {
+        switch keyCode {
+        case 18: return "1"
+        case 19: return "2"
+        case 20: return "3"
+        case 21: return "4"
+        case 23: return "5"
+        default: return ""
+        }
+    }
+
+    private static func isRegisteredSpaceHotkey(
+        keyCode: UInt16,
+        modifiers: NSEvent.ModifierFlags
+    ) -> Bool {
+        guard keyCode == 49 else { return false }
+        return modifiers == [.option]
+            || modifiers == [.control, .option]
+            || modifiers == [.control, .option, .command]
     }
 }

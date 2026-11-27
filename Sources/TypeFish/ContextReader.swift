@@ -260,14 +260,8 @@ enum ContextReader {
             // Extract the CFRange from the AXValue
             var range = CFRange(location: 0, length: 0)
             if AXValueGetValue(rangeValue as! AXValue, .cfRange, &range) {
-                let cursorPosition = range.location
-                if cursorPosition > 0 && cursorPosition <= fullText.count {
-                    let endIndex = fullText.index(fullText.startIndex, offsetBy: min(cursorPosition, fullText.count))
-                    textBeforeCursor = String(fullText[..<endIndex])
-                } else {
-                    // Cursor at start or invalid — use full text
-                    textBeforeCursor = fullText
-                }
+                guard let before = textBeforeSelection(in: fullText, range: NSRange(location: range.location, length: range.length)) else { return nil }
+                textBeforeCursor = before
             } else {
                 textBeforeCursor = fullText
             }
@@ -290,6 +284,11 @@ enum ContextReader {
         
         Log.info("📖 Context: captured \(trimmed.count) chars from \(role) in \(app.localizedName ?? "?")")
         return trimmed
+    }
+
+    static func textBeforeSelection(in text: String, range: NSRange) -> String? {
+        guard AnchoredTextRegion.isValidUTF16Range(range, in: text) else { return nil }
+        return (text as NSString).substring(to: range.location)
     }
 
     private static func simulateKey(_ keyCode: CGKeyCode, flags: CGEventFlags = []) {

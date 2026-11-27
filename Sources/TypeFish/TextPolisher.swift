@@ -350,7 +350,7 @@ enum TextPolisher {
         return max(text.count, 200)
     }
     
-    private static func usesReasoningTokens(model: String) -> Bool {
+    static func usesReasoningTokens(model: String) -> Bool {
         model.hasPrefix("openai/gpt-oss")
     }
 }
