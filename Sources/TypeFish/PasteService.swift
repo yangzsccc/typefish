@@ -2,55 +2,124 @@ import AppKit
 
 private final class PasteConfirmationResult: @unchecked Sendable {
     private let lock = NSLock()
-    private var anchor: PostPasteCaptureAnchor?
+    private var confirmation: PasteCaptureConfirmation?
     private let previousContents: String?
     private let writtenChangeCount: Int
-    private let onConfirmation: (PostPasteCaptureAnchor?) -> Void
+    private let onConfirmation: (PasteCaptureConfirmation?) -> Void
 
     init(previousContents: String?, writtenChangeCount: Int,
-         onConfirmation: @escaping (PostPasteCaptureAnchor?) -> Void) {
+         onConfirmation: @escaping (PasteCaptureConfirmation?) -> Void) {
         self.previousContents = previousContents
         self.writtenChangeCount = writtenChangeCount
         self.onConfirmation = onConfirmation
     }
 
-    func store(_ anchor: PostPasteCaptureAnchor?) {
+    func store(_ confirmation: PasteCaptureConfirmation?) {
         lock.lock()
-        self.anchor = anchor
+        self.confirmation = confirmation
         lock.unlock()
     }
 
     func deliverOnMain() {
         lock.lock()
-        let anchor = self.anchor
+        let confirmation = self.confirmation
         lock.unlock()
 
-        if anchor != nil, let previousContents {
+        if confirmation?.deliveryConfirmed == true, let previousContents {
             PasteService.restorePasteboardIfUnchanged(
                 previousContents: previousContents,
                 writtenChangeCount: writtenChangeCount
             )
         }
-        onConfirmation(anchor)
+        onConfirmation(confirmation)
     }
+}
+
+enum PasteDispatch {
+    case sent, noInput, destinationUnavailable
 }
 
 enum PasteDeliveryStatus {
     case confirming
     case confirmed
     case copyAvailable
+    case unconfirmed
 
     var message: String {
         switch self {
         case .confirming: return "⏳ Confirming insertion..."
         case .confirmed: return "✅ Done"
         case .copyAvailable: return "📋 Paste not confirmed — result ready to copy"
+        case .unconfirmed: return "⚠️ Insertion could not be verified"
         }
     }
 }
 
+enum PasteTargetAccessibility {
+    enum FocusedElementAssessment: Equatable {
+        case editable
+        case nonEditable
+        case unknown
+    }
+
+    private static let editableRoles: Set<String> = [
+        "AXComboBox",
+        "AXSearchField",
+        "AXSecureTextField",
+        "AXTextArea",
+        "AXTextField",
+        "AXTextView"
+    ]
+
+    private static let nonEditableRoles: Set<String> = [
+        "AXButton",
+        "AXCheckBox",
+        "AXImage",
+        "AXMenu",
+        "AXMenuBar",
+        "AXMenuBarItem",
+        "AXMenuButton",
+        "AXMenuItem",
+        "AXPopUpButton",
+        "AXRadioButton",
+        "AXRow",
+        "AXSlider",
+        "AXStaticText",
+        "AXSwitch",
+        "AXTabGroup",
+        "AXToolbar",
+        "AXWindow"
+    ]
+
+    private static let ambiguousRoles: Set<String> = [
+        "AXCell",
+        "AXGroup",
+        "AXList",
+        "AXOutline",
+        "AXScrollArea",
+        "AXSplitGroup",
+        "AXSplitter",
+        "AXTable",
+        "AXWebArea"
+    ]
+
+    static func assessment(
+        role: String?,
+        valueIsSettable: Bool,
+        selectedTextIsSettable: Bool
+    ) -> FocusedElementAssessment {
+        guard let role else { return .unknown }
+        if editableRoles.contains(role) { return .editable }
+        if ambiguousRoles.contains(role) {
+            return valueIsSettable || selectedTextIsSettable ? .editable : .unknown
+        }
+        if nonEditableRoles.contains(role) { return .nonEditable }
+        return .unknown
+    }
+}
+
 /// Pastes text at the current cursor position.
-/// Tracks the frontmost app and restores focus before pasting.
+/// Delivers only while the original application still has focus.
 enum PasteService {
     
     /// The app that was active when recording started
@@ -95,26 +164,26 @@ enum PasteService {
     /// Returns true if paste was likely successful (a text field was focused).
     @discardableResult
     static func paste(_ text: String) -> Bool {
-        pasteImpl(text, captureForLearning: false).pasted
+        pasteImpl(text, captureForLearning: false).dispatch == .sent
     }
 
     /// Pastes text and returns a pre-paste witness for asynchronous confirmation.
     static func pasteForLearning(
         _ text: String,
-        onConfirmation: ((PostPasteCaptureAnchor?) -> Void)? = nil
-    ) -> (pasted: Bool, pending: PendingPasteCapture?) {
+        onConfirmation: ((PasteCaptureConfirmation?) -> Void)? = nil
+    ) -> (dispatch: PasteDispatch, pending: PendingPasteCapture?) {
         pasteImpl(text, captureForLearning: true, onConfirmation: onConfirmation)
     }
 
     private static func pasteImpl(
         _ text: String,
         captureForLearning: Bool,
-        onConfirmation: ((PostPasteCaptureAnchor?) -> Void)? = nil
-    ) -> (pasted: Bool, pending: PendingPasteCapture?) {
-        guard !text.isEmpty else { return (false, nil) }
+        onConfirmation: ((PasteCaptureConfirmation?) -> Void)? = nil
+    ) -> (dispatch: PasteDispatch, pending: PendingPasteCapture?) {
+        guard !text.isEmpty else { return (.destinationUnavailable, nil) }
         
         // Check if there's a focused text input BEFORE pasting
-        let hasTextInput = checkForTextInput()
+        let targetKind = assessInputTarget()
         
         // Save current pasteboard content to restore later
         let pasteboard = NSPasteboard.general
@@ -125,13 +194,13 @@ enum PasteService {
         pasteboard.setString(text, forType: .string)
         let writtenChangeCount = pasteboard.changeCount
         
-        if hasTextInput, let app = savedApp {
+        if targetKind != .nonEditable, let app = savedApp {
             guard isSavedApplicationFrontmost(
                 frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
                 targetPID: app.processIdentifier
             ) else {
                 Log.info("Paste skipped: the original app is no longer frontmost; result is on the clipboard")
-                return (false, nil)
+                return (.destinationUnavailable, nil)
             }
 
             let pendingCapture: PendingPasteCapture?
@@ -157,7 +226,8 @@ enum PasteService {
                 targetsMatch: targetMatches
             ) else {
                 Log.info("Paste skipped: the dictation destination could not be matched to the recording field")
-                return (false, nil)
+                let noInput = targetKind == .unknown && pendingCapture == nil && expectedTarget == nil
+                return (noInput ? .noInput : .destinationUnavailable, nil)
             }
             
             var commandDispatched = false
@@ -170,7 +240,7 @@ enum PasteService {
                     commandDispatched = true
                 case .targetChanged:
                     Log.info("Paste skipped: ChatGPT field changed before its native paste command")
-                    return (false, nil)
+                    return (.destinationUnavailable, nil)
                 case .unavailable:
                     break
                 }
@@ -178,7 +248,7 @@ enum PasteService {
 
             if !commandDispatched, !postCommandKey(9, to: app) {
                 Log.info("Paste destination unavailable. Text is on the clipboard.")
-                return (false, nil)
+                return (.destinationUnavailable, nil)
             }
             
             // Restore previous pasteboard content after a delay
@@ -186,7 +256,7 @@ enum PasteService {
                 guard let pendingCapture else {
                     DispatchQueue.main.async { onConfirmation(nil) }
                     Log.info("Paste was sent, but its destination could not be verified")
-                    return (true, nil)
+                    return (.sent, nil)
                 }
 
                 let result = PasteConfirmationResult(
@@ -196,16 +266,19 @@ enum PasteService {
                 )
                 Task.detached(priority: .utility) {
                     let deadline = ProcessInfo.processInfo.systemUptime + 2
-                    var anchor: PostPasteCaptureAnchor?
+                    var confirmation: PasteCaptureConfirmation?
                     repeat {
                         if let confirmed = pendingCapture.confirm() {
-                            anchor = confirmed
+                            confirmation = confirmed
                             break
                         }
                         try? await Task.sleep(nanoseconds: 100_000_000)
                     } while ProcessInfo.processInfo.systemUptime < deadline
 
-                    result.store(anchor)
+                    if confirmation == nil {
+                        Log.info("Paste confirmation timed out: \(pendingCapture.lastConfirmationFailure)")
+                    }
+                    result.store(confirmation)
                     DispatchQueue.main.async { result.deliverOnMain() }
                 }
             } else if let previous = previousContents {
@@ -220,11 +293,11 @@ enum PasteService {
             }
             
             Log.info("📋 Pasted \(text.count) chars to cursor")
-            return (true, pendingCapture)
+            return (.sent, pendingCapture)
         } else {
             // No text input found — text stays on clipboard
             Log.info("📋 No text input focused — copied \(text.count) chars to clipboard")
-            return (false, nil)
+            return (.noInput, nil)
         }
     }
 
@@ -289,28 +362,57 @@ enum PasteService {
     }
     
     /// Check if there's likely a place to paste.
-    /// We can't reliably detect text inputs (Electron apps like Discord don't support AX).
-    /// Instead: if there's a frontmost app with a window, assume paste will work.
-    /// Only return false when clearly on desktop / no app / no windows.
-    private static func checkForTextInput() -> Bool {
-        guard let app = savedApp else { return false }
-        
-        // Finder with no windows = desktop, nowhere to paste
-        if app.bundleIdentifier == "com.apple.finder" {
-            // Check if Finder has any regular windows open
-            let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
-            let finderWindows = windows.filter {
-                ($0[kCGWindowOwnerPID as String] as? Int32) == app.processIdentifier &&
-                ($0[kCGWindowLayer as String] as? Int) == 0
-            }
-            if finderWindows.isEmpty {
-                Log.info("📌 Desktop detected (Finder, no windows) — no paste target")
-                return false
-            }
+    private static func assessInputTarget() -> PasteTargetAccessibility.FocusedElementAssessment {
+        guard let app = savedApp else { return .nonEditable }
+        if let (role, valueIsSettable, selectedTextIsSettable) = focusedElement(in: app) {
+            let target = PasteTargetAccessibility.assessment(
+                role: role, valueIsSettable: valueIsSettable, selectedTextIsSettable: selectedTextIsSettable
+            )
+            if target != .unknown { return target }
         }
-        
-        // For any other app with windows, assume paste will work
-        return true
+
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        let hasWindow = windows.contains {
+            ($0[kCGWindowOwnerPID as String] as? Int32) == app.processIdentifier && ($0[kCGWindowLayer as String] as? Int) == 0
+        }
+        // Custom editors can accept paste without exposing their input through Accessibility.
+        return hasWindow ? .unknown : .nonEditable
+    }
+
+    private static func focusedElement(in app: NSRunningApplication) -> (String?, Bool, Bool)? {
+        let application = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.012)
+        var focusedValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            application,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedValue
+        ) == .success,
+              let focusedValue,
+              CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else { return nil }
+
+        let element = unsafeBitCast(focusedValue, to: AXUIElement.self)
+        AXUIElementSetMessagingTimeout(element, 0.012)
+        var roleValue: CFTypeRef?
+        let role: String?
+        if AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleValue) == .success {
+            role = roleValue as? String
+        } else {
+            role = nil
+        }
+        guard PasteTargetAccessibility.assessment(role: role, valueIsSettable: false, selectedTextIsSettable: false) == .unknown else {
+            return (role, false, false)
+        }
+        return (
+            role,
+            isAttributeSettable(kAXValueAttribute as CFString, on: element),
+            isAttributeSettable(kAXSelectedTextAttribute as CFString, on: element)
+        )
+    }
+
+    private static func isAttributeSettable(_ attribute: CFString, on element: AXUIElement) -> Bool {
+        var settable = DarwinBoolean(false)
+        return AXUIElementIsAttributeSettable(element, attribute, &settable) == .success && settable.boolValue
     }
     
     private static func postCommandKey(_ keyCode: CGKeyCode, to app: NSRunningApplication) -> Bool {

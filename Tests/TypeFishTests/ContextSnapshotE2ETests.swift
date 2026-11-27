@@ -111,8 +111,8 @@ final class ContextSnapshotE2ETests: XCTestCase {
             XCTFail("Foreground destination changed before paste; refusing to send input")
             return
         }
-        let (pasted, pending) = PasteService.pasteForLearning(fixture.original)
-        guard pasted else {
+        let (dispatch, pending) = PasteService.pasteForLearning(fixture.original)
+        guard dispatch == .sent else {
             XCTFail("PasteService did not paste into the verified synthetic field")
             return
         }
@@ -174,7 +174,7 @@ final class ContextSnapshotE2ETests: XCTestCase {
     private func awaitConfirmation(_ pending: PendingPasteCapture) async -> PostPasteCaptureAnchor? {
         let deadline = ProcessInfo.processInfo.systemUptime + 2
         while ProcessInfo.processInfo.systemUptime < deadline {
-            if let anchor = await Task.detached(priority: .userInitiated, operation: { pending.confirm() }).value { return anchor }
+            if let anchor = await Task.detached(priority: .userInitiated, operation: { pending.confirm()?.learningAnchor }).value { return anchor }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
         return nil

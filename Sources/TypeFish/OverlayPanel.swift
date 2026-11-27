@@ -17,6 +17,7 @@ class OverlayPanel {
     private var checkmark: NSTextField?
     private var animTimer: Timer?
     private var dismissTimer: Timer?
+    private var resultDismissTimer: Timer?
     
     private let pillWidth: CGFloat = 48
     private let pillHeight: CGFloat = 28
@@ -33,6 +34,8 @@ class OverlayPanel {
     func showRecording(translate: Bool = false, command: Bool = false) {
         DispatchQueue.main.async { [weak self] in
             self?.dismissTimer?.invalidate()
+            self?.resultDismissTimer?.invalidate()
+            self?.resultDismissTimer = nil
             self?.resultWindow?.orderOut(nil)
             self?.resultWindow = nil
             self?.ensureWindow()
@@ -71,11 +74,12 @@ class OverlayPanel {
     }
     
     /// Show result text with a copy button (when no text field is focused)
-    func showResult(_ text: String, keepUntilDismissed: Bool = false) {
+    func showResult(_ text: String) {
         DispatchQueue.main.async { [weak self] in
             self?.stopAnimation()
-            self?.dismissTimer?.invalidate()
-            self?.presentResultWindow(text, keepUntilDismissed: keepUntilDismissed)
+            self?.resultDismissTimer?.invalidate()
+            self?.resultDismissTimer = nil
+            self?.presentResultWindow(text)
         }
     }
     
@@ -522,7 +526,9 @@ class OverlayPanel {
     
     private var resultWindow: NSPanel?
     
-    private func presentResultWindow(_ text: String, keepUntilDismissed: Bool) {
+    static let resultAutoDismissInterval: TimeInterval = 8
+
+    private func presentResultWindow(_ text: String) {
         // Dismiss the recording overlay first
         if let w = window {
             w.orderOut(nil)
@@ -618,10 +624,10 @@ class OverlayPanel {
         
         self.resultWindow = panel
         
-        dismissTimer?.invalidate()
-        guard !keepUntilDismissed else { return }
-        dismissTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: false) { [weak self] _ in
-            self?.dismissResultWindow()
+        resultDismissTimer?.invalidate()
+        resultDismissTimer = Timer.scheduledTimer(withTimeInterval: Self.resultAutoDismissInterval, repeats: false) { [weak self, weak panel] _ in
+            guard let panel else { return }
+            self?.dismissResultWindow(matching: panel)
         }
     }
     
@@ -644,6 +650,13 @@ class OverlayPanel {
     
     private func dismissResultWindow() {
         guard let w = resultWindow else { return }
+        dismissResultWindow(matching: w)
+    }
+
+    private func dismissResultWindow(matching expectedWindow: NSPanel) {
+        guard let w = resultWindow, w === expectedWindow else { return }
+        resultDismissTimer?.invalidate()
+        resultDismissTimer = nil
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.25
             w.animator().alphaValue = 0
@@ -651,5 +664,9 @@ class OverlayPanel {
             w.orderOut(nil)
             if self?.resultWindow === w { self?.resultWindow = nil }
         })
+    }
+
+    func resultWindowIsVisibleForTesting() -> Bool {
+        resultWindow?.isVisible == true
     }
 }

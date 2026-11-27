@@ -207,6 +207,146 @@ final class PostPasteCaptureTests: XCTestCase {
         XCTAssertNil(AnchoredTextRegion.confirmed(before: selectedBefore, after: wrongCaret, insertedText: "same", sameTarget: true))
     }
 
+    func testEmptyComposerAnchorsTheCorrectedChineseName() {
+        let insertedText = "请核对刘俊炎提交的名单。"
+        let correctedText = "请核对刘俊言提交的名单。"
+        let before = TextFieldSnapshot(
+            text: "",
+            selectedRange: NSRange(location: 0, length: 0),
+            hasMarkedText: false
+        )
+        let after = TextFieldSnapshot(
+            text: insertedText,
+            selectedRange: NSRange(location: (insertedText as NSString).length, length: 0),
+            hasMarkedText: false
+        )
+
+        let region = AnchoredTextRegion.confirmed(
+            before: before,
+            after: after,
+            insertedText: insertedText,
+            sameTarget: true
+        )
+
+        XCTAssertEqual(region?.candidate(in: correctedText), correctedText)
+        XCTAssertEqual(
+            region?.candidate(in: correctedText, selectedRange: NSRange(location: 3, length: 3)),
+            correctedText
+        )
+        XCTAssertTrue(EditTracker.shouldAnalyzeEditForTesting(original: insertedText, edited: correctedText))
+        XCTAssertEqual(
+            EditTracker.computeDiffForTesting(original: insertedText, edited: correctedText).first?.removed,
+            "炎"
+        )
+        XCTAssertEqual(
+            EditTracker.computeDiffForTesting(original: insertedText, edited: correctedText).first?.inserted,
+            "言"
+        )
+        XCTAssertNil(AnchoredTextRegion.confirmed(
+            before: before,
+            after: after,
+            insertedText: insertedText,
+            sameTarget: false
+        ))
+    }
+
+    func testConfirmsVisibleChatGPTInsertionWhileUserSelectsAName() {
+        let insertedText = "请核对刘俊炎提交的名单。"
+        let before = TextFieldSnapshot(
+            text: "",
+            selectedRange: NSRange(location: 0, length: 0),
+            markedTextStatus: .absent
+        )
+        let after = TextFieldSnapshot(
+            text: insertedText,
+            selectedRange: NSRange(location: 3, length: 3),
+            markedTextStatus: .absent
+        )
+
+        let region = AnchoredTextRegion.confirmed(
+            before: before,
+            after: after,
+            insertedText: insertedText,
+            sameTarget: true,
+            allowSelectionWithinInsertedText: true
+        )
+
+        XCTAssertEqual(region?.candidate(in: "请核对刘俊言提交的名单。"), "请核对刘俊言提交的名单。")
+        XCTAssertEqual(
+            region?.candidate(
+                in: "请核对刘俊言提交的名单。",
+                selectedRange: NSRange(location: 3, length: 3)
+            ),
+            "请核对刘俊言提交的名单。"
+        )
+        XCTAssertNil(AnchoredTextRegion.confirmed(
+            before: before,
+            after: after,
+            insertedText: insertedText,
+            sameTarget: false,
+            allowSelectionWithinInsertedText: true
+        ))
+        XCTAssertNil(AnchoredTextRegion.confirmed(
+            before: before,
+            after: TextFieldSnapshot(
+                text: insertedText,
+                selectedRange: NSRange(location: (insertedText as NSString).length, length: 0),
+                markedTextStatus: .absent
+            ),
+            insertedText: insertedText + " wrong",
+            sameTarget: true,
+            allowSelectionWithinInsertedText: true
+        ))
+        XCTAssertNil(AnchoredTextRegion.confirmed(
+            before: before,
+            after: TextFieldSnapshot(
+                text: insertedText,
+                selectedRange: NSRange(location: (insertedText as NSString).length + 1, length: 0),
+                markedTextStatus: .absent
+            ),
+            insertedText: insertedText,
+            sameTarget: true,
+            allowSelectionWithinInsertedText: true
+        ))
+        XCTAssertNotNil(AnchoredTextRegion.confirmed(
+            before: before,
+            after: TextFieldSnapshot(
+                text: insertedText,
+                selectedRange: NSRange(location: (insertedText as NSString).length, length: 0),
+                markedTextStatus: .absent
+            ),
+            insertedText: insertedText,
+            sameTarget: true
+        ))
+    }
+
+    func testInsertionAtStartOfRealDraftPreservesItsOriginalText() {
+        let insertedText = "dictation"
+        let existingDraft = "existing draft"
+        let before = TextFieldSnapshot(
+            text: existingDraft,
+            selectedRange: NSRange(location: 0, length: 0),
+            markedTextStatus: .absent
+        )
+        let after = TextFieldSnapshot(
+            text: insertedText + existingDraft,
+            selectedRange: NSRange(location: (insertedText as NSString).length, length: 0),
+            markedTextStatus: .absent
+        )
+
+        let region = AnchoredTextRegion.confirmed(
+            before: before,
+            after: after,
+            insertedText: insertedText,
+            sameTarget: true,
+            allowSelectionWithinInsertedText: true
+        )
+
+        XCTAssertEqual(region?.prefix, "")
+        XCTAssertEqual(region?.suffix, existingDraft)
+        XCTAssertEqual(region?.candidate(in: "corrected" + existingDraft), "corrected")
+    }
+
     func testAXSnapshotRequiresStringButAllowsEmptyString() {
         XCTAssertNotNil(TextFieldSnapshot(axValue: "", selectedRange: NSRange(location: 0, length: 0), markedTextStatus: .unavailable))
         XCTAssertNil(TextFieldSnapshot(axValue: NSNumber(value: 7), selectedRange: NSRange(location: 0, length: 0), markedTextStatus: .absent))

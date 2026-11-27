@@ -520,31 +520,32 @@ class AppState: ObservableObject {
                     }
 
                     // Try to paste to cursor
-                    let (pasted, _) = PasteService.pasteForLearning(finalText) { [weak self] confirmedAnchor in
-                        metrics.success = confirmedAnchor != nil
-                        if confirmedAnchor == nil {
+                    let (dispatch, _) = PasteService.pasteForLearning(finalText) { [weak self] confirmation in
+                        let delivered = confirmation?.deliveryConfirmed == true
+                        metrics.success = delivered
+                        if !delivered {
                             metrics.errorType = "paste_unconfirmed"
                         }
                         MetricsLogger.log(metrics)
                         guard let self, self.recordingID == id else { return }
 
-                        if let confirmedAnchor {
+                        if delivered {
                             self.statusText = PasteDeliveryStatus.confirmed.message
                             self.overlay.showDone()
-
-                            if let key = self.groqAPIKey {
-                                EditTracker.shared.startTracking(
-                                    pastedText: finalText,
-                                    confirmedAnchor: confirmedAnchor,
-                                    apiKey: key,
-                                    appState: self
-                                )
-                            }
                             Log.info("Dictation insertion confirmed")
                         } else {
-                            self.statusText = PasteDeliveryStatus.copyAvailable.message
-                            self.overlay.showResult(finalText, keepUntilDismissed: true)
-                            Log.info("Dictation insertion was not confirmed; kept result available")
+                            self.statusText = PasteDeliveryStatus.unconfirmed.message
+                            self.overlay.dismiss()
+                            Log.info("Dictation insertion was not visually confirmed; transcript remains on the clipboard")
+                        }
+
+                        if let confirmation, let key = self.groqAPIKey {
+                            EditTracker.shared.startTracking(
+                                pastedText: finalText,
+                                confirmedAnchor: confirmation.learningAnchor,
+                                apiKey: key,
+                                appState: self
+                            )
                         }
 
                         self.onStateChange?()
@@ -563,19 +564,20 @@ class AppState: ObservableObject {
                     )
 
                     self.isProcessing = false
-                    self.statusText = pasted
+                    self.statusText = dispatch == .sent
                         ? PasteDeliveryStatus.confirming.message
                         : PasteDeliveryStatus.copyAvailable.message
                     self.onStateChange?()
 
-                    if !pasted {
+                    if dispatch != .sent {
                         metrics.success = false
-                        metrics.errorType = "no_paste_target"
+                        metrics.errorType = dispatch == .noInput ? "no_paste_target" : "paste_target_changed"
                         MetricsLogger.log(metrics)
-                        // No text input focused — show result panel with copy button
-                        self.overlay.showResult(finalText, keepUntilDismissed: true)
-
-                        // Reset status after 2 seconds. The result remains available in the panel.
+                        if dispatch == .noInput {
+                            self.overlay.showResult(finalText)
+                        } else {
+                            self.overlay.dismiss()
+                        }
                         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                             guard self.recordingID == id, !self.isRecording && !self.isProcessing else { return }
                             self.statusText = "Ready"

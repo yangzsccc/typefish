@@ -50,7 +50,8 @@ struct AnchoredTextRegion: Equatable {
         before: TextFieldSnapshot,
         after: TextFieldSnapshot,
         insertedText: String,
-        sameTarget: Bool
+        sameTarget: Bool,
+        allowSelectionWithinInsertedText: Bool = false
     ) -> AnchoredTextRegion? {
         guard sameTarget,
               before.markedTextStatus != .present,
@@ -74,8 +75,12 @@ struct AnchoredTextRegion: Equatable {
             location: before.selectedRange.location,
             length: (insertedText as NSString).length
         )
-        guard after.selectedRange.location == NSMaxRange(insertedRange),
-              after.selectedRange.length == 0 else {
+        let selectionEnd = NSMaxRange(after.selectedRange)
+        let selectionWithinInsertion = after.selectedRange.location >= insertedRange.location
+            && selectionEnd <= NSMaxRange(insertedRange)
+        let selectionAtInsertionEnd = after.selectedRange.location == NSMaxRange(insertedRange)
+            && after.selectedRange.length == 0
+        guard allowSelectionWithinInsertedText ? selectionWithinInsertion : selectionAtInsertionEnd else {
             return nil
         }
         let afterNSString = after.text as NSString
@@ -190,6 +195,7 @@ final class PendingPasteCapture {
     private let application: NSRunningApplication
     private let before: AccessibilityFieldSnapshot
     private let insertedText: String
+    private(set) var lastConfirmationFailure = "not-checked"
 
     private init(
         application: NSRunningApplication,
@@ -265,25 +271,48 @@ final class PendingPasteCapture {
         return command.perform()
     }
 
-    func confirm() -> PostPasteCaptureAnchor? {
-        guard !Thread.isMainThread else { return nil }
-        guard let after = AccessibilityFieldSnapshot.read(from: application, totalTimeout: 0.05),
-              before.target.matches(after.target),
-              let region = AnchoredTextRegion.confirmed(
-                before: before.textSnapshot,
-                after: after.textSnapshot,
-                insertedText: insertedText,
-                sameTarget: true
-              ) else {
+    func confirm() -> PasteCaptureConfirmation? {
+        guard !Thread.isMainThread else {
+            lastConfirmationFailure = "main-thread-read"
+            return nil
+        }
+        guard let after = AccessibilityFieldSnapshot.read(from: application, totalTimeout: 0.05) else {
+            lastConfirmationFailure = "focused-field-unavailable"
+            return nil
+        }
+        guard before.target.matches(after.target) else {
+            lastConfirmationFailure = "target-changed"
             return nil
         }
 
-        if PasteService.requiresVerifiedTarget(for: application.bundleIdentifier) {
-            guard after.target.hasVisibleInsertion(endingAt: after.selectedRange.location) else { return nil }
+        guard let region = AnchoredTextRegion.confirmed(
+            before: before.textSnapshot,
+            after: after.textSnapshot,
+            insertedText: insertedText,
+            sameTarget: true,
+            allowSelectionWithinInsertedText: true
+        ) else {
+            lastConfirmationFailure = "text-or-selection-mismatch beforeUTF16=\(before.text.utf16.count) insertedUTF16=\((insertedText as NSString).length) afterUTF16=\(after.text.utf16.count) selection=\(after.selectedRange.location),\(after.selectedRange.length)"
+            return nil
         }
 
-        return PostPasteCaptureAnchor(application: application, target: before, region: region)
+        let insertionEnd = region.prefix.utf16.count + region.originalText.utf16.count
+        let deliveryConfirmed = !PasteService.requiresVerifiedTarget(for: application.bundleIdentifier)
+            || after.target.hasVisibleInsertion(endingAt: insertionEnd)
+        lastConfirmationFailure = deliveryConfirmed
+            ? "confirmed"
+            : "visible-range-or-display-unavailable insertionEnd=\(insertionEnd) selection=\(after.selectedRange.location),\(after.selectedRange.length)"
+
+        return PasteCaptureConfirmation(
+            learningAnchor: PostPasteCaptureAnchor(application: application, target: before, region: region),
+            deliveryConfirmed: deliveryConfirmed
+        )
     }
+}
+
+struct PasteCaptureConfirmation {
+    let learningAnchor: PostPasteCaptureAnchor
+    let deliveryConfirmed: Bool
 }
 
 final class PostPasteCaptureAnchor {

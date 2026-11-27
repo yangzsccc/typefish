@@ -79,3 +79,13 @@ With Accessibility permission, TypeFish now handles the Option+Space press and r
 | Deliberate switch during processing | After the user action changed focus from ChatGPT to a TextEdit scratch document, the scratch retained focus and its contents. The clipboard contained the completed dictation. |
 
 The service tests used isolated dictionaries and substituted a fixed audio file at the recorder boundary. The signed application tests used the normal microphone recorder and both hotkey transitions. The desktop-enabled Swift suite ran 86 tests with 85 passes, one skipped historical audio fixture and zero failures. These are macOS results. iPhone Notes was outside the test environment.
+
+## Version 2.6.3 clipboard feedback and early name edits
+
+When dictation is sent to an editor, a slow or unsuccessful Accessibility confirmation no longer opens the Copy window. The status pill dismisses and the transcript remains on the clipboard if TypeFish cannot verify the insertion. When no input field can be identified as a destination, a separate Copy window appears for eight seconds. Closing that window leaves the clipboard available. Switching destinations during processing keeps the result on the clipboard.
+
+An editor can move its selection as soon as text appears. TypeFish now accepts a caret or selection wholly inside the inserted span when the before and after text match the expected insertion exactly in the same field and window. The last inserted character's visibility controls the Done indicator in ChatGPT. The verified text and field control whether TypeFish can learn a subsequent change. A confirmation timeout records the verification stage and numeric text lengths or selection offsets in the local app log.
+
+A real ChatGPT draft on this Mac reproduced the regression in 2.6.2. Immediately selecting two name characters after insertion produced a persistent Copy window and the edit went unlearned. In 2.6.3, the same action kept the copy window closed. Correcting the name in the draft updated an isolated dictionary, and replaying the same Mandarin audio produced the preferred spelling in both the raw transcript and the next insertion. Moving the caret outside the inserted span left the transcript available on the clipboard and showed no Copy window. In a native test window focused on a button, the Copy window appeared, faded away after about 8.5 seconds and left the transcript on the clipboard.
+
+The desktop-enabled suite ran 95 tests with 94 passes and one skipped historical microphone fixture. The editor tests used real windows and an audio-file recorder fixture for repeatable transcription. The signed local application build was verified after archive extraction.

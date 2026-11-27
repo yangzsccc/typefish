@@ -56,6 +56,32 @@ final class OverlayPanelE2ETests: XCTestCase {
         }
     }
 
+    func testCopyFallbackResultWindowAutomaticallyDismisses() throws {
+        guard ProcessInfo.processInfo.environment["TYPEFISH_RUN_E2E"] == "1" else {
+            throw XCTSkip("Set TYPEFISH_RUN_E2E=1 to run the result-window E2E test.")
+        }
+
+        let overlay = OverlayPanel()
+        try runOnMainThread {
+            overlay.showResult("TypeFish clipboard fallback test")
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertTrue(try runOnMainThread { overlay.resultWindowIsVisibleForTesting() })
+
+        RunLoop.current.run(until: Date().addingTimeInterval(OverlayPanel.resultAutoDismissInterval - 1))
+        try runOnMainThread {
+            overlay.showResult("TypeFish replacement fallback test")
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(1.3))
+        XCTAssertTrue(try runOnMainThread { overlay.resultWindowIsVisibleForTesting() })
+        try runOnMainThread { overlay.dismiss() }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertTrue(try runOnMainThread { overlay.resultWindowIsVisibleForTesting() })
+
+        RunLoop.current.run(until: Date().addingTimeInterval(OverlayPanel.resultAutoDismissInterval - 1 + 0.4))
+        XCTAssertFalse(try runOnMainThread { overlay.resultWindowIsVisibleForTesting() })
+    }
+
     private static func captureWindow(id: Int, path: String) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
