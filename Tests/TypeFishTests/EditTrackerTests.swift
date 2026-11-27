@@ -36,6 +36,30 @@ final class EditTrackerTests: XCTestCase {
         XCTAssertNil(EditTracker.shared.validatedTerm("NONE", original: original, edited: edited))
         XCTAssertEqual(EditTracker.shared.validatedTerm("Claude Code", original: "Cloud Code", edited: "Claude Code"), "Claude Code")
         XCTAssertEqual(EditTracker.shared.validatedTerm("陈晨", original: "请交给陈辰", edited: "请交给陈晨"), "陈晨")
+        XCTAssertEqual(
+            EditTracker.shared.validatedTerm(
+                "刘俊彦",
+                original: "请将名单交给刘俊言核对",
+                edited: "请将名单交给刘俊彦核对"
+            ),
+            "刘俊彦"
+        )
+        XCTAssertEqual(
+            EditTracker.shared.validatedTerm(
+                "刘俊彦",
+                original: "请将名单交给刘俊延核对",
+                edited: "请将名单交给刘俊彦核对"
+            ),
+            "刘俊彦"
+        )
+        XCTAssertEqual(
+            EditTracker.shared.validatedTerm(
+                "俊彦",
+                original: "请联系刘俊言处理",
+                edited: "请联系刘俊彦处理"
+            ),
+            "俊彦"
+        )
     }
 
     func testSingleWordPositiveKeepsUnchangedTitleCaseNameNeighbor() {

@@ -4,6 +4,7 @@ import Carbon.HIToolbox
 
 enum AnchoredEditObservation: Equatable {
     case text(String)
+    case temporarilyUnavailable
     case unavailable
     case composing
     case cleared
@@ -200,6 +201,38 @@ final class PendingPasteCapture {
         self.insertedText = insertedText
     }
 
+    static func focusedTarget(in application: NSRunningApplication) -> AccessibilityTargetIdentity? {
+        guard !Thread.isMainThread else { return nil }
+        if let target = AccessibilityFieldSnapshot.read(from: application, totalTimeout: 0.05)?.target {
+            return target
+        }
+        guard PasteService.requiresVerifiedTarget(for: application.bundleIdentifier),
+              AXIsProcessTrusted(), !IsSecureEventInputEnabled(),
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier
+        else { return nil }
+        // A cold Electron renderer may not have exposed its editable field yet.
+        let app = AXUIElementCreateApplication(application.processIdentifier)
+        AXUIElementSetMessagingTimeout(app, 0.025)
+        let originalWindow = AccessibilityFieldSnapshot.copyElementAttribute(
+            kAXFocusedWindowAttribute as CFString, from: app, deadline: Date().addingTimeInterval(0.025)
+        )
+        guard AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue) == .success
+        else { return nil }
+        for _ in 0..<5 {
+            Thread.sleep(forTimeInterval: 0.045)
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier else { return nil }
+            if let target = AccessibilityFieldSnapshot.read(from: application, totalTimeout: 0.05)?.target {
+                guard originalWindow.map({ CFEqual($0, target.window) }) ?? true else { return nil }
+                return target
+            }
+        }
+        return nil
+    }
+
+    func matches(_ expected: AccessibilityTargetIdentity) -> Bool {
+        before.target.matches(expected)
+    }
+
     static func capture(
         application: NSRunningApplication,
         insertedText: String
@@ -221,6 +254,17 @@ final class PendingPasteCapture {
         return PendingPasteCapture(application: application, before: captured, insertedText: insertedText)
     }
 
+    /// Use the application's own paste action so the editor receives its normal paste command.
+    func performNativePasteIfUnchanged(_ command: NativePasteCommand) -> NativePasteCommandResult {
+        guard command.pid == application.processIdentifier,
+              let current = AccessibilityFieldSnapshot.read(from: application, totalTimeout: 0.025),
+              before.target.matches(current.target),
+              before.text.utf16.elementsEqual(current.text.utf16),
+              before.selectedRange == current.selectedRange,
+              current.markedTextStatus != .present else { return .targetChanged }
+        return command.perform()
+    }
+
     func confirm() -> PostPasteCaptureAnchor? {
         guard !Thread.isMainThread else { return nil }
         guard let after = AccessibilityFieldSnapshot.read(from: application, totalTimeout: 0.05),
@@ -232,6 +276,10 @@ final class PendingPasteCapture {
                 sameTarget: true
               ) else {
             return nil
+        }
+
+        if PasteService.requiresVerifiedTarget(for: application.bundleIdentifier) {
+            guard after.target.hasVisibleInsertion(endingAt: after.selectedRange.location) else { return nil }
         }
 
         return PostPasteCaptureAnchor(application: application, target: before, region: region)
@@ -257,16 +305,23 @@ final class PostPasteCaptureAnchor {
         isNonDirectInputMethod: Bool
     ) -> AnchoredEditObservation {
         guard !Thread.isMainThread else { return .unavailable }
-        guard let current = AccessibilityFieldSnapshot.read(from: application, totalTimeout: 0.05),
-              target.target.matches(current.target) else {
+        guard let current = AccessibilityFieldSnapshot.read(from: application, totalTimeout: 0.05) else {
+            return target.target.observationAfterReadFailure()
+        }
+        guard target.target.matches(current.target) else {
+            Log.info("Edit learning: focused field or window changed")
             return .unavailable
         }
-        return region.observation(
+        let observation = region.observation(
             in: current.text,
             selectedRange: current.selectedRange,
             markedTextStatus: current.markedTextStatus,
             isNonDirectInputMethod: isNonDirectInputMethod
         )
+        if observation == .unavailable {
+            Log.info("Edit learning: insertion boundaries or caret no longer match")
+        }
+        return observation
     }
 }
 
@@ -283,6 +338,12 @@ enum TypeFishInputMethodState {
 }
 
 enum AccessibilityCapturePolicy {
+    static func includesInsertedCharacter(endingAt caret: Int, visibleRange: CFRange) -> Bool {
+        guard visibleRange.location >= 0, visibleRange.length >= 0,
+              caret > visibleRange.location else { return false }
+        return caret - visibleRange.location <= visibleRange.length
+    }
+
     static func isDisplayedPlaceholder(value: String, title: String, selection: NSRange,
                                        editorClasses: [String], childClasses: [String]) -> Bool {
         guard selection == NSRange(location: 0, length: 0), !title.isEmpty,
@@ -398,14 +459,14 @@ private extension AccessibilityFieldSnapshot {
         return value
     }
 
-    private static func copyElementAttribute(_ attribute: CFString, from element: AXUIElement, deadline: Date) -> AXUIElement? {
+    fileprivate static func copyElementAttribute(_ attribute: CFString, from element: AXUIElement, deadline: Date) -> AXUIElement? {
         guard let value = copyAttribute(attribute, from: element, deadline: deadline) else { return nil }
         let reference = value as CFTypeRef
         guard CFGetTypeID(reference) == AXUIElementGetTypeID() else { return nil }
         return unsafeBitCast(reference, to: AXUIElement.self)
     }
 
-    private static func copyAXValueAttribute(_ attribute: CFString, from element: AXUIElement, deadline: Date) -> AXValue? {
+    fileprivate static func copyAXValueAttribute(_ attribute: CFString, from element: AXUIElement, deadline: Date) -> AXValue? {
         guard let value = copyAttribute(attribute, from: element, deadline: deadline) else { return nil }
         let reference = value as CFTypeRef
         guard CFGetTypeID(reference) == AXValueGetTypeID() else { return nil }
@@ -442,6 +503,49 @@ struct AccessibilityTargetIdentity {
     let processIdentifier: pid_t
     let window: AXUIElement
     let element: AXUIElement
+
+    fileprivate func hasVisibleInsertion(endingAt caret: Int) -> Bool {
+        func rect(of element: AXUIElement) -> CGRect? {
+            var point = CGPoint.zero, size = CGSize.zero
+            let deadline = Date().addingTimeInterval(0.04)
+            guard let position = AccessibilityFieldSnapshot.copyAXValueAttribute(
+                kAXPositionAttribute as CFString, from: element, deadline: deadline
+            ), let dimensions = AccessibilityFieldSnapshot.copyAXValueAttribute(
+                kAXSizeAttribute as CFString, from: element, deadline: deadline
+            ), AXValueGetValue(position, .cgPoint, &point), AXValueGetValue(dimensions, .cgSize, &size) else { return nil }
+            return CGRect(origin: point, size: size)
+        }
+        guard let fieldRect = rect(of: element), let windowRect = rect(of: window) else { return false }
+        let visibleRect = fieldRect.intersection(windowRect)
+        var displays: UInt32 = 0
+        guard !visibleRect.isEmpty, CGGetDisplaysWithRect(visibleRect, 0, nil, &displays) == .success,
+              displays > 0 else { return false }
+        guard let range = AccessibilityFieldSnapshot.copyAXValueAttribute(
+            kAXVisibleCharacterRangeAttribute as CFString, from: element, deadline: Date().addingTimeInterval(0.025)
+        ) else { return true }
+        var visible = CFRange()
+        guard AXValueGetValue(range, .cfRange, &visible), visible.location >= 0, visible.length >= 0 else { return true }
+        // At least the last inserted character should be visible in a scrolling composer.
+        return AccessibilityCapturePolicy.includesInsertedCharacter(endingAt: caret, visibleRange: visible)
+    }
+
+    /// A failed text read is retryable only while the original window remains active.
+    /// A positively identified different field, app or window invalidates the session.
+    fileprivate func observationAfterReadFailure() -> AnchoredEditObservation {
+        guard AXIsProcessTrusted(), !IsSecureEventInputEnabled(),
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier
+        else { return .unavailable }
+        let app = AXUIElementCreateApplication(processIdentifier)
+        AXUIElementSetMessagingTimeout(app, 0.025)
+        var currentWindow: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &currentWindow) == .success,
+              let currentWindow, CFEqual(currentWindow, window) else { return .unavailable }
+        var currentField: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &currentField)
+        if status == .cannotComplete || status == .noValue { return .temporarilyUnavailable }
+        guard status == .success, let currentField, CFEqual(currentField, element) else { return .unavailable }
+        return .temporarilyUnavailable
+    }
 
     func matches(_ other: AccessibilityTargetIdentity) -> Bool {
         processIdentifier == other.processIdentifier

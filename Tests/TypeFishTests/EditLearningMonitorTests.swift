@@ -32,6 +32,36 @@ final class EditLearningMonitorTests: XCTestCase {
         XCTAssertEqual(active, [true, false])
     }
 
+    func testTransientAccessibilityGapsDuringObservationAndVerificationDoNotLoseEdit() async {
+        let monitor = EditLearningMonitor(timing: .init(sample: 0.003, confirm: 0.03, transientReadGrace: 0.06,
+                                                          settle: 0.012, idle: 0.15, lifetime: 0.3))
+        var reads = 0
+        var saved = [String]()
+        monitor.start(original: "刘俊延是一只小猪", confirm: {
+            {
+                reads += 1
+                if reads <= 4 || (reads >= 7 && reads <= 9) { return .temporarilyUnavailable }
+                return .text("刘俊彦是一只小猪")
+            }
+        }, classify: { _ in "刘俊彦" }, learn: { saved.append($0) })
+
+        await wait { !monitor.isActive }
+        XCTAssertEqual(saved, ["刘俊彦"])
+        XCTAssertGreaterThanOrEqual(reads, 10)
+    }
+
+    func testPersistentTemporaryReadDoesNotWriteAndReleasesListener() async {
+        let monitor = EditLearningMonitor(timing: .init(sample: 0.003, confirm: 0.03, transientReadGrace: 0.025,
+                                                          settle: 0.012, idle: 0.15, lifetime: 0.3))
+        var active = [Bool]()
+        monitor.onActiveChange = { active.append($0) }
+        monitor.start(original: "cloud code", confirm: { { .temporarilyUnavailable } },
+                      classify: { _ in XCTFail("Unconfirmed edit reached classifier"); return nil },
+                      learn: { _ in XCTFail("Temporary read failure learned a term") })
+        await wait { !monitor.isActive }
+        XCTAssertEqual(active, [true, false])
+    }
+
     func testUnconfirmedIdleMovedAndComposingFieldsAreReleasedWithoutWriting() async {
         let monitor = EditLearningMonitor(timing: timing)
         let field = SampleField(.text("Cloud"))

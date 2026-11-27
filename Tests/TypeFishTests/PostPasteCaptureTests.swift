@@ -3,6 +3,55 @@ import ApplicationServices
 @testable import TypeFish
 
 final class PostPasteCaptureTests: XCTestCase {
+    func testComposerCanShowTheEndOfALongDictationAndRejectHiddenText() {
+        let visible = CFRange(location: 60, length: 12)
+        XCTAssertTrue(AccessibilityCapturePolicy.includesInsertedCharacter(endingAt: 72, visibleRange: visible))
+        XCTAssertFalse(AccessibilityCapturePolicy.includesInsertedCharacter(endingAt: 60, visibleRange: visible))
+        XCTAssertFalse(AccessibilityCapturePolicy.includesInsertedCharacter(endingAt: 80, visibleRange: visible))
+        XCTAssertFalse(AccessibilityCapturePolicy.includesInsertedCharacter(endingAt: 12, visibleRange: CFRange()))
+    }
+
+    func testDictationStatusReportsDoneOnlyAfterInsertionConfirmation() {
+        XCTAssertEqual(PasteDeliveryStatus.confirming.message, "⏳ Confirming insertion...")
+        XCTAssertEqual(PasteDeliveryStatus.confirmed.message, "✅ Done")
+        XCTAssertEqual(PasteDeliveryStatus.copyAvailable.message, "📋 Paste not confirmed — result ready to copy")
+    }
+
+    func testChatGPTPasteRequiresTheSameVerifiedFieldFromRecordingThroughDelivery() {
+        XCTAssertTrue(PasteService.requiresVerifiedTarget(for: "com.openai.codex"))
+        XCTAssertFalse(PasteService.requiresVerifiedTarget(for: "com.apple.Notes"))
+        XCTAssertFalse(PasteService.shouldPostPaste(
+            requiresVerifiedTarget: true,
+            hasRecordingTarget: false,
+            hasPasteTarget: true,
+            targetsMatch: true
+        ))
+        XCTAssertFalse(PasteService.shouldPostPaste(
+            requiresVerifiedTarget: true,
+            hasRecordingTarget: true,
+            hasPasteTarget: false,
+            targetsMatch: true
+        ))
+        XCTAssertFalse(PasteService.shouldPostPaste(
+            requiresVerifiedTarget: true,
+            hasRecordingTarget: true,
+            hasPasteTarget: true,
+            targetsMatch: false
+        ))
+        XCTAssertTrue(PasteService.shouldPostPaste(
+            requiresVerifiedTarget: true,
+            hasRecordingTarget: true,
+            hasPasteTarget: true,
+            targetsMatch: true
+        ))
+        XCTAssertTrue(PasteService.shouldPostPaste(
+            requiresVerifiedTarget: false,
+            hasRecordingTarget: false,
+            hasPasteTarget: false,
+            targetsMatch: true
+        ))
+    }
+
     func testBlankWebEditorRequiresAnExplicitPlaceholderChildAndCollapsedStart() {
         func isPlaceholder(_ text: String, _ children: [String], cursor: Int = 0) -> Bool {
             AccessibilityCapturePolicy.isDisplayedPlaceholder(value: text, title: "Example prompt",
@@ -194,6 +243,16 @@ final class PostPasteCaptureTests: XCTestCase {
         XCTAssertFalse(PasteService.shouldActivateSavedApp(frontmostPID: 10, targetPID: 10))
         XCTAssertTrue(PasteService.shouldRestorePasteboard(currentChangeCount: 4, writtenChangeCount: 4))
         XCTAssertFalse(PasteService.shouldRestorePasteboard(currentChangeCount: 5, writtenChangeCount: 4))
+        XCTAssertFalse(PasteService.shouldRestorePasteboardAfterConfirmation(
+            confirmed: false,
+            currentChangeCount: 4,
+            writtenChangeCount: 4
+        ))
+        XCTAssertTrue(PasteService.shouldRestorePasteboardAfterConfirmation(
+            confirmed: true,
+            currentChangeCount: 4,
+            writtenChangeCount: 4
+        ))
     }
 
     func testCandidateSupportsFieldWithNoContextAroundInsertion() {

@@ -45,18 +45,17 @@ class EditTracker {
     }
 
     @MainActor
-    func startTracking(pastedText: String, pending: PendingPasteCapture?, apiKey: String, appState: AppState) {
+    func startTracking(pastedText: String, confirmedAnchor: PostPasteCaptureAnchor?, apiKey: String, appState: AppState) {
         stopTracking()
-        guard let pending, !pastedText.isEmpty else {
+        guard let confirmedAnchor, !pastedText.isEmpty else {
             Log.info("Edit learning skipped: no verified destination")
             return
         }
         let model = appState.config.polisherModel
         monitor.start(original: pastedText, confirm: {
-            guard let anchor = pending.confirm() else { return nil }
-            return {
+            {
                 let composingInput = DispatchQueue.main.sync { TypeFishInputMethodState.isNonDirectOnMainThread() }
-                return anchor.read(isNonDirectInputMethod: composingInput)
+                return confirmedAnchor.read(isNonDirectInputMethod: composingInput)
             }
         }, classify: { [weak self] edited in
             await self?.preferredSpelling(original: pastedText, edited: edited, apiKey: apiKey, model: model)

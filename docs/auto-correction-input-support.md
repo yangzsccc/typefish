@@ -56,3 +56,11 @@ The QA executable used the production Carbon hotkey callback, record finalizatio
 A clean release checkout ran 74 tests with desktop integration enabled. The TextEdit and Chrome contenteditable tests both verified the paste, the selected correction and the extracted text. One optional historical recording fixture was unavailable. The earlier 89-test run above included separate local microphone work.
 
 In a foreground TextEdit fixture on this Mac, a synthetic Command-V posted at the hardware event tap could leave the editor unchanged. The release verifies the foreground process and posts the shortcut to the current login session. If the original app cannot regain focus, the dictated text is available on the clipboard. The release candidate also passed strict code-signature verification after extraction with the updater’s unzip tool.
+
+## ChatGPT delivery and Notes learning in the 2.6.1 candidate
+
+For the tested installation of ChatGPT for Mac, the application identifies itself as `com.openai.codex`. The candidate records the focused field when recording begins. If the renderer has not exposed an editable field yet, it requests Electron's accessibility tree while recording. When possible it invokes the application's standard Paste menu item. After an ambiguous menu response it checks the result without posting another paste. The Done indicator requires the expected text and caret in the original field, with the composer on screen. Unconfirmed dictation remains available in a Copy panel until dismissed or another recording starts. [Electron accessibility](https://www.electronjs.org/docs/latest/tutorial/accessibility/)
+
+After confirming a paste, the learning monitor allows a two-second interruption in Accessibility reads if the original window is still active. A confirmed field or window change, an unsafe caret, or a changed insertion boundary still ends the session. Unit tests cover recovery, expiry, and a fresh field check before saving. A service integration test with a temporary dictionary replayed identical synthetic Mandarin audio and obtained the corrected full name in both the raw transcription and polished output.
+
+The release-mode candidate has independent regression and service coverage. Foreground acceptance on the reported Mac ChatGPT and Apple Notes windows requires an unlocked desktop.

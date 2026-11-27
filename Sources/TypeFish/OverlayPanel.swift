@@ -27,6 +27,8 @@ class OverlayPanel {
     func showRecording(translate: Bool = false, command: Bool = false) {
         DispatchQueue.main.async { [weak self] in
             self?.dismissTimer?.invalidate()
+            self?.resultWindow?.orderOut(nil)
+            self?.resultWindow = nil
             self?.ensureWindow()
             self?.checkmark?.isHidden = true
             if command {
@@ -63,11 +65,11 @@ class OverlayPanel {
     }
     
     /// Show result text with a copy button (when no text field is focused)
-    func showResult(_ text: String) {
+    func showResult(_ text: String, keepUntilDismissed: Bool = false) {
         DispatchQueue.main.async { [weak self] in
             self?.stopAnimation()
             self?.dismissTimer?.invalidate()
-            self?.presentResultWindow(text)
+            self?.presentResultWindow(text, keepUntilDismissed: keepUntilDismissed)
         }
     }
     
@@ -517,7 +519,7 @@ class OverlayPanel {
     
     private var resultWindow: NSPanel?
     
-    private func presentResultWindow(_ text: String) {
+    private func presentResultWindow(_ text: String, keepUntilDismissed: Bool) {
         // Dismiss the recording overlay first
         if let w = window {
             w.orderOut(nil)
@@ -614,8 +616,8 @@ class OverlayPanel {
         
         self.resultWindow = panel
         
-        // Auto-dismiss after 8 seconds if not clicked
         dismissTimer?.invalidate()
+        guard !keepUntilDismissed else { return }
         dismissTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: false) { [weak self] _ in
             self?.dismissResultWindow()
         }
@@ -641,7 +643,7 @@ class OverlayPanel {
             w.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
             w.orderOut(nil)
-            self?.resultWindow = nil
+            if self?.resultWindow === w { self?.resultWindow = nil }
         })
     }
 }

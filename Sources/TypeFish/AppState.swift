@@ -520,9 +520,40 @@ class AppState: ObservableObject {
                     }
 
                     // Try to paste to cursor
-                    let (pasted, pending) = PasteService.pasteForLearning(finalText)
-                    metrics.success = true
-                    MetricsLogger.log(metrics)
+                    let (pasted, _) = PasteService.pasteForLearning(finalText) { [weak self] confirmedAnchor in
+                        metrics.success = confirmedAnchor != nil
+                        if confirmedAnchor == nil {
+                            metrics.errorType = "paste_unconfirmed"
+                        }
+                        MetricsLogger.log(metrics)
+                        guard let self, self.recordingID == id else { return }
+
+                        if let confirmedAnchor {
+                            self.statusText = PasteDeliveryStatus.confirmed.message
+                            self.overlay.showDone()
+
+                            if let key = self.groqAPIKey {
+                                EditTracker.shared.startTracking(
+                                    pastedText: finalText,
+                                    confirmedAnchor: confirmedAnchor,
+                                    apiKey: key,
+                                    appState: self
+                                )
+                            }
+                            Log.info("Dictation insertion confirmed")
+                        } else {
+                            self.statusText = PasteDeliveryStatus.copyAvailable.message
+                            self.overlay.showResult(finalText, keepUntilDismissed: true)
+                            Log.info("Dictation insertion was not confirmed; kept result available")
+                        }
+
+                        self.onStateChange?()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                            guard self.recordingID == id, !self.isRecording && !self.isProcessing else { return }
+                            self.statusText = "Ready"
+                            self.onStateChange?()
+                        }
+                    }
 
                     // Record successful transcription for style learning
                     StyleLearner.shared.recordSuccess(
@@ -532,29 +563,21 @@ class AppState: ObservableObject {
                     )
 
                     self.isProcessing = false
-                    self.statusText = "✅ Done"
+                    self.statusText = pasted
+                        ? PasteDeliveryStatus.confirming.message
+                        : PasteDeliveryStatus.copyAvailable.message
                     self.onStateChange?()
 
-                    if pasted {
-                        self.overlay.showDone()
-
-                        // Start edit tracking for auto-dictionary learning
-                        if let key = self.groqAPIKey {
-                            EditTracker.shared.startTracking(
-                                pastedText: finalText,
-                                pending: pending,
-                                apiKey: key,
-                                appState: self
-                            )
-                        }
-                    } else {
+                    if !pasted {
+                        metrics.success = false
+                        metrics.errorType = "no_paste_target"
+                        MetricsLogger.log(metrics)
                         // No text input focused — show result panel with copy button
-                        self.overlay.showResult(finalText)
-                    }
+                        self.overlay.showResult(finalText, keepUntilDismissed: true)
 
-                    // Reset status after 2 seconds
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        if !self.isRecording && !self.isProcessing {
+                        // Reset status after 2 seconds. The result remains available in the panel.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                            guard self.recordingID == id, !self.isRecording && !self.isProcessing else { return }
                             self.statusText = "Ready"
                             self.onStateChange?()
                         }

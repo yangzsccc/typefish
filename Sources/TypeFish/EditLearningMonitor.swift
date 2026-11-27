@@ -9,6 +9,7 @@ final class EditLearningMonitor {
     struct Timing {
         var sample: TimeInterval = 0.15
         var confirm: TimeInterval = 1.2
+        var transientReadGrace: TimeInterval = 2
         var settle: TimeInterval = 1.6
         var idle: TimeInterval = 15
         var lifetime: TimeInterval = 75
@@ -69,15 +70,26 @@ final class EditLearningMonitor {
             var attempted: String?
             var last = original
             var changedAt = self.now
-            while self.generation == id && !Task.isCancelled && self.now - start < self.timing.lifetime {
+            var transientReadStartedAt: TimeInterval?
+            observationLoop: while self.generation == id && !Task.isCancelled && self.now - start < self.timing.lifetime {
                 let observation = await Task.detached(priority: .utility) { reader() }.value
                 guard self.generation == id, !Task.isCancelled else { return }
                 let submitted: Bool
                 switch observation {
+                case .temporarilyUnavailable:
+                    let gapStart = transientReadStartedAt ?? self.now
+                    transientReadStartedAt = gapStart
+                    guard self.now - gapStart < self.timing.transientReadGrace else {
+                        Log.info("Edit learning skipped: field stayed temporarily unavailable")
+                        return
+                    }
+                    await self.waitForSample()
+                    continue
                 case .unavailable:
                     Log.info("Edit learning skipped: destination or span unavailable")
                     return
                 case .composing:
+                    transientReadStartedAt = nil
                     // Discard provisional and previously observed text until the IME commits.
                     last = original
                     attempted = nil
@@ -86,9 +98,11 @@ final class EditLearningMonitor {
                     await self.waitForSample()
                     continue
                 case .cleared:
+                    transientReadStartedAt = nil
                     guard self.recentEnter, last != original else { return }
                     submitted = true
                 case .text(let text):
+                    transientReadStartedAt = nil
                     if text != last {
                         last = text
                         attempted = nil
@@ -102,15 +116,28 @@ final class EditLearningMonitor {
                     guard self.generation == id, !Task.isCancelled, self.now - start < self.timing.lifetime else { return }
                     if let proposed {
                         // Recheck the destination even when Enter cleared the previous field value.
-                        let current = await Task.detached(priority: .utility) { reader() }.value
-                        guard self.generation == id, !Task.isCancelled else { return }
+                        let deadline = min(start + self.timing.lifetime, self.now + self.timing.transientReadGrace)
+                        var current: AnchoredEditObservation
+                        repeat {
+                            current = await Task.detached(priority: .utility) { reader() }.value
+                            guard self.generation == id, !Task.isCancelled else { return }
+                            if current != .temporarilyUnavailable { break }
+                            await self.waitForSample()
+                        } while self.now < deadline
+                        guard self.generation == id, !Task.isCancelled, self.now < start + self.timing.lifetime else { return }
                         switch current {
                         case .text(let text) where text == last: break
                         case .cleared where submitted || self.recentEnter: break
-                        case .text, .composing:
+                        case .composing:
+                            last = original
+                            attempted = nil
                             changedAt = self.now
-                            continue
-                        default: return
+                            continue observationLoop
+                        case .text, .cleared:
+                            changedAt = self.now
+                            continue observationLoop
+                        case .temporarilyUnavailable, .unavailable:
+                            return
                         }
                         learn(proposed)
                         return
